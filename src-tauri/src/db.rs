@@ -133,8 +133,18 @@ impl Database {
         Self::migrate_export_items_cost_price(&conn)?;
         // Cột mở rộng cho bán hàng (POS): chiết khấu, thanh toán, liên kết khách/NCC.
         Self::add_column_if_missing(&conn, "export_receipts", "customer_id", "INTEGER")?;
-        Self::add_column_if_missing(&conn, "export_receipts", "discount", "REAL NOT NULL DEFAULT 0")?;
-        Self::add_column_if_missing(&conn, "export_receipts", "amount_paid", "REAL NOT NULL DEFAULT 0")?;
+        Self::add_column_if_missing(
+            &conn,
+            "export_receipts",
+            "discount",
+            "REAL NOT NULL DEFAULT 0",
+        )?;
+        Self::add_column_if_missing(
+            &conn,
+            "export_receipts",
+            "amount_paid",
+            "REAL NOT NULL DEFAULT 0",
+        )?;
         Self::add_column_if_missing(
             &conn,
             "export_receipts",
@@ -149,7 +159,12 @@ impl Database {
 
     /// Older DBs created before FIFO costing existed lack this column.
     fn migrate_export_items_cost_price(conn: &Connection) -> SqlResult<()> {
-        Self::add_column_if_missing(conn, "export_items", "cost_price", "REAL NOT NULL DEFAULT 0")
+        Self::add_column_if_missing(
+            conn,
+            "export_items",
+            "cost_price",
+            "REAL NOT NULL DEFAULT 0",
+        )
     }
 
     /// Adds `column` (with the given SQL type/default `ddl`) to `table` if a DB
@@ -377,7 +392,13 @@ impl Database {
             conn.execute(
                 "INSERT INTO customers (code, name, phone, address, note)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![input.code, input.name, input.phone, input.address, input.note],
+                params![
+                    input.code,
+                    input.name,
+                    input.phone,
+                    input.address,
+                    input.note
+                ],
             )?;
             conn.last_insert_rowid()
         };
@@ -452,7 +473,13 @@ impl Database {
             conn.execute(
                 "INSERT INTO suppliers (code, name, phone, address, note)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![input.code, input.name, input.phone, input.address, input.note],
+                params![
+                    input.code,
+                    input.name,
+                    input.phone,
+                    input.address,
+                    input.note
+                ],
             )?;
             conn.last_insert_rowid()
         };
@@ -849,11 +876,8 @@ impl Database {
 
     pub fn get_dashboard_stats(&self) -> SqlResult<DashboardStats> {
         let conn = self.conn.lock().unwrap();
-        let total_products: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM products",
-            [],
-            |row| row.get(0),
-        )?;
+        let total_products: i64 =
+            conn.query_row("SELECT COUNT(*) FROM products", [], |row| row.get(0))?;
         let low_stock_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM products WHERE stock_quantity <= min_stock",
             [],
@@ -913,7 +937,11 @@ impl Database {
                 let revenue: f64 = row.get(4)?;
                 let cost: f64 = row.get(5)?;
                 let profit = revenue - cost;
-                let margin_percent = if revenue > 0.0 { profit / revenue * 100.0 } else { 0.0 };
+                let margin_percent = if revenue > 0.0 {
+                    profit / revenue * 100.0
+                } else {
+                    0.0
+                };
                 Ok(ProductProfitRow {
                     product_id: row.get(0)?,
                     product_code: row.get(1)?,

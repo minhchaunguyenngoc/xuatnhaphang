@@ -1,5 +1,7 @@
 # Xuất Nhập Hàng — Quản lý Nhập Xuất Kho
 
+![CI](https://github.com/minhchaunguyenngoc/xuatnhaphang/actions/workflows/ci.yml/badge.svg)
+
 Ứng dụng Desktop quản lý kho hàng, nhập xuất hàng hóa (Tauri 2 + Next.js 15 +
 SQLite). Chạy hoàn toàn local, theo dõi tồn kho realtime, quản lý sản phẩm, phiếu
 nhập/xuất, tính lợi nhuận theo FIFO và xuất báo cáo Excel.
