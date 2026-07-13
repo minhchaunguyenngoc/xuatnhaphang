@@ -1,36 +1,54 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Xuất Nhập Hàng — Quản lý Nhập Xuất Kho
 
-## Getting Started
+Ứng dụng Desktop quản lý kho hàng, nhập xuất hàng hóa (Tauri 2 + Next.js 15 +
+SQLite). Chạy hoàn toàn local, theo dõi tồn kho realtime, quản lý sản phẩm, phiếu
+nhập/xuất, tính lợi nhuận theo FIFO và xuất báo cáo Excel.
 
-First, run the development server:
+## 📥 Tải về & cài đặt (người dùng)
+
+Vào mục **[Releases](../../releases)** → tải file mới nhất theo hệ điều hành:
+
+| Hệ điều hành | File tải về |
+| --- | --- |
+| Windows | `...x64-setup.exe` (hoặc `.msi`) |
+| macOS (Intel & Apple Silicon) | `...universal.dmg` |
+
+App **chưa mua chữ ký số** nên lần đầu mở sẽ có cảnh báo bảo mật — đây là bình
+thường, làm theo hướng dẫn dưới để bỏ qua:
+
+**Windows:** chạy file `-setup.exe` → gặp màn hình *"Windows protected your PC"* →
+bấm **More info** → **Run anyway** → cài như bình thường. (WebView2 tự tải nếu máy
+chưa có; Windows 11 đã có sẵn.)
+
+**macOS:** mở file `.dmg`, kéo app vào **Applications**. Lần đầu mở nếu báo *"không
+mở được / bị hỏng"*:
+- Chuột phải vào app trong Applications → **Open** → **Open**; hoặc
+- Mở Terminal chạy: `xattr -cr "/Applications/Xuat Nhap Hang.app"` rồi mở lại.
+
+## 🛠️ Phát triển (developer)
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install          # cài dependencies
+npm run tauri:dev    # chạy app ở chế độ dev
+npm run tauri:build  # build file cài cho hệ điều hành hiện tại
+npm run lint         # kiểm tra lint
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+> ⚠️ Build local chỉ tạo được file cài của **chính hệ điều hành đang chạy**
+> (máy Mac ra `.dmg`, máy Windows ra `.exe`). Muốn có đủ cả 2 nền tảng, dùng
+> phát hành tự động bên dưới.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 🚀 Phát hành (release)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Việc build file cài cho Windows + macOS được **GitHub Actions tự động** hóa qua
+[`.github/workflows/release.yml`](.github/workflows/release.yml). Quy trình:
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. Cập nhật version cho khớp nhau ở 3 file: `package.json`, `src-tauri/tauri.conf.json`,
+   `src-tauri/Cargo.toml`.
+2. Commit, rồi tạo & đẩy tag:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+3. Actions build cả macOS + Windows (~10–20 phút) và tự tạo **Release** đính kèm
+   file cài. Xong là người dùng vào Releases tải về được ngay.
