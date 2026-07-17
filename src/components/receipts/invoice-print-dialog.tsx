@@ -59,6 +59,27 @@ export function InvoicePrintDialog({
 
   if (!receipt) return null;
 
+  // Chi tiết thanh toán chỉ áp dụng cho phiếu xuất/hóa đơn bán (Issue 12).
+  const exportReceipt =
+    type === "export" ? (receipt as ExportReceipt) : null;
+  const itemsSubtotal = receipt.items.reduce(
+    (sum, item) => sum + item.total_price,
+    0,
+  );
+  // `amount_paid` là tiền khách đưa (tender); kẹp vào [0, total] để ra số đã áp
+  // vào hóa đơn, phần dư là tiền thừa, phần thiếu là còn nợ.
+  const paidApplied = exportReceipt
+    ? Math.min(Math.max(exportReceipt.amount_paid, 0), exportReceipt.total_amount)
+    : 0;
+  const changeDue = exportReceipt
+    ? Math.max(exportReceipt.amount_paid - exportReceipt.total_amount, 0)
+    : 0;
+  const remainingDebt = exportReceipt
+    ? Math.max(exportReceipt.total_amount - exportReceipt.amount_paid, 0)
+    : 0;
+  const paymentMethodLabel =
+    exportReceipt?.payment_method === "transfer" ? "Chuyển khoản" : "Tiền mặt";
+
   const partnerLabel = type === "import" ? "Nhà cung cấp" : "Khách hàng";
   const title = type === "import" ? "PHIẾU NHẬP KHO" : "PHIẾU XUẤT KHO";
   const hasCompany =
@@ -185,11 +206,51 @@ export function InvoicePrintDialog({
           </table>
 
           <div className="flex justify-end">
-            <div className="w-64 space-y-1 text-sm">
+            <div className="w-72 space-y-1 text-sm">
+              {exportReceipt ? (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Tổng tiền hàng</span>
+                    <span>{formatCurrency(itemsSubtotal)}</span>
+                  </div>
+                  {exportReceipt.discount > 0 ? (
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Chiết khấu</span>
+                      <span>-{formatCurrency(exportReceipt.discount)}</span>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
               <div className="flex justify-between border-t pt-1 text-base font-semibold">
                 <span>Tổng cộng</span>
                 <span>{formatCurrency(receipt.total_amount)}</span>
               </div>
+              {exportReceipt ? (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Đã thanh toán</span>
+                    <span>{formatCurrency(paidApplied)}</span>
+                  </div>
+                  {changeDue > 0 ? (
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Tiền thừa</span>
+                      <span>{formatCurrency(changeDue)}</span>
+                    </div>
+                  ) : null}
+                  {remainingDebt > 0 ? (
+                    <div className="flex justify-between font-medium">
+                      <span className="text-muted-foreground">Còn nợ</span>
+                      <span>{formatCurrency(remainingDebt)}</span>
+                    </div>
+                  ) : null}
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">
+                      Phương thức
+                    </span>
+                    <span>{paymentMethodLabel}</span>
+                  </div>
+                </>
+              ) : null}
             </div>
           </div>
 

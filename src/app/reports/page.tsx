@@ -80,7 +80,7 @@ export default function ReportsPage() {
         <StatCard
           title="Lợi nhuận tháng"
           value={formatCurrency(dashboardStats?.profit_month ?? 0)}
-          hint="Xuất - Nhập trong tháng hiện tại"
+          hint="Doanh thu − giá vốn FIFO (đã trừ chiết khấu phiếu)"
         />
       </div>
 

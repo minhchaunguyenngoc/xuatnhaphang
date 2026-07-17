@@ -43,5 +43,8 @@ export function todayISO(): string {
 export function generateReceiptNumber(prefix: string): string {
   const now = new Date();
   const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
-  return `${prefix}-${stamp}`;
+  // Thêm hậu tố ngẫu nhiên để tránh trùng số phiếu khi tạo nhiều phiếu trong
+  // cùng một giây (Issue 14). Ràng buộc UNIQUE ở DB là chốt chặn cuối.
+  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `${prefix}-${stamp}-${suffix}`;
 }

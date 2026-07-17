@@ -45,6 +45,10 @@ export function ProductFormDialog({
   product,
   onSubmit,
 }: ProductFormDialogProps) {
+  // Khi sửa sản phẩm còn tồn kho, giá nhập là giá vốn bình quân hệ thống quản lý
+  // → khóa ô nhập để tránh sai định giá (Issue 15).
+  const lockImportPrice = !!product && product.stock_quantity > 0;
+
   const {
     register,
     handleSubmit,
@@ -119,8 +123,15 @@ export function ProductFormDialog({
                 id="import_price"
                 type="number"
                 min={0}
+                readOnly={lockImportPrice}
+                className={lockImportPrice ? "bg-muted" : undefined}
                 {...register("import_price", { valueAsNumber: true })}
               />
+              {lockImportPrice ? (
+                <p className="text-xs text-muted-foreground">
+                  Giá vốn bình quân do hệ thống tự tính khi còn tồn kho.
+                </p>
+              ) : null}
             </div>
             <div className="space-y-2">
               <Label htmlFor="export_price">Giá xuất</Label>

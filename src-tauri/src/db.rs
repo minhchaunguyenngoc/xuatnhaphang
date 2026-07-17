@@ -1,10 +1,33 @@
 use rusqlite::{params, Connection, Result as SqlResult};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::AppHandle;
 use tauri::Manager;
 
 use crate::models::*;
+
+/// Tạo lỗi nghiệp vụ mang thông điệp tiếng Việt. Dùng biến thể
+/// `InvalidParameterName(String)` làm "hộp" chứa chuỗi; tầng commands
+/// (`map_err_vi`) rút đúng chuỗi này ra để hiển thị, không kèm prefix kỹ thuật.
+pub fn app_err(msg: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(msg.into())
+}
+
+/// Validate phần đầu phiếu (số phiếu, ngày, có ít nhất 1 dòng). Dùng chung cho
+/// cả phiếu nhập và phiếu xuất — chặn dữ liệu rỗng trước khi ghi DB.
+fn validate_receipt_header(receipt_number: &str, date: &str, item_count: usize) -> SqlResult<()> {
+    if receipt_number.trim().is_empty() {
+        return Err(app_err("Số phiếu không được để trống."));
+    }
+    if date.trim().is_empty() {
+        return Err(app_err("Ngày phiếu không được để trống."));
+    }
+    if item_count == 0 {
+        return Err(app_err("Phiếu phải có ít nhất 1 sản phẩm."));
+    }
+    Ok(())
+}
 
 pub struct Database {
     pub conn: Mutex<Connection>,
@@ -152,6 +175,13 @@ impl Database {
             "TEXT NOT NULL DEFAULT 'cash'",
         )?;
         Self::add_column_if_missing(&conn, "import_receipts", "supplier_id", "INTEGER")?;
+        // FIFO phải theo NGÀY PHIẾU, không theo thời điểm insert (Issue 8). Thêm
+        // cột ngày nhập trên batch; batch cũ backfill = ngày tạo.
+        Self::add_column_if_missing(&conn, "product_batches", "import_date", "TEXT")?;
+        conn.execute(
+            "UPDATE product_batches SET import_date = date(created_at) WHERE import_date IS NULL OR import_date = ''",
+            [],
+        )?;
         Self::backfill_batches_for_existing_stock(&conn)?;
 
         Ok(())
@@ -195,8 +225,8 @@ impl Database {
     /// migration ran) get one synthetic opening batch so FIFO costing has a basis.
     fn backfill_batches_for_existing_stock(conn: &Connection) -> SqlResult<()> {
         conn.execute(
-            "INSERT INTO product_batches (product_id, receipt_id, quantity, remaining_quantity, cost_price, created_at)
-             SELECT id, NULL, stock_quantity, stock_quantity, import_price, created_at
+            "INSERT INTO product_batches (product_id, receipt_id, quantity, remaining_quantity, cost_price, import_date, created_at)
+             SELECT id, NULL, stock_quantity, stock_quantity, import_price, date(created_at), created_at
              FROM products
              WHERE stock_quantity > 0
                AND id NOT IN (SELECT DISTINCT product_id FROM product_batches)",
@@ -216,7 +246,7 @@ impl Database {
             let mut stmt = tx.prepare(
                 "SELECT id, remaining_quantity, cost_price FROM product_batches
                  WHERE product_id = ?1 AND remaining_quantity > 0
-                 ORDER BY created_at ASC, id ASC",
+                 ORDER BY COALESCE(import_date, date(created_at)) ASC, id ASC",
             )?;
             let rows = stmt
                 .query_map(params![product_id], |row| {
@@ -242,17 +272,38 @@ impl Database {
         }
 
         if remaining > 0 {
-            // Data drift fallback (should not normally happen): cost the shortfall
-            // at the product's current average cost so profit reporting stays sane.
-            let fallback_price: f64 = tx.query_row(
-                "SELECT import_price FROM products WHERE id = ?1",
-                params![product_id],
-                |row| row.get(0),
-            )?;
-            total_cost += remaining as f64 * fallback_price;
+            // Không đủ lô để tiêu thụ (tồn ↔ batch lệch nhau). Sau khi đã kiểm tra
+            // tồn gộp ở create_export_receipt thì gần như không xảy ra; nếu có thì
+            // báo lỗi để rollback, KHÔNG âm thầm lấy giá vốn tạm (Issue 10).
+            let code: String = tx
+                .query_row(
+                    "SELECT code FROM products WHERE id = ?1",
+                    params![product_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| product_id.to_string());
+            return Err(app_err(format!(
+                "Không đủ lô hàng để xuất cho sản phẩm {code}. Vui lòng kiểm tra lại tồn kho."
+            )));
         }
 
         Ok(total_cost)
+    }
+
+    /// Tính lại giá vốn bình quân (`products.import_price`) từ các lô còn tồn sau
+    /// khi xuất FIFO (Issue 5). Hết lô → 0 để không định giá tồn sai.
+    fn recompute_avg_cost(tx: &rusqlite::Transaction, product_id: i64) -> SqlResult<()> {
+        let avg_cost: f64 = tx.query_row(
+            "SELECT COALESCE(SUM(remaining_quantity * cost_price) / NULLIF(SUM(remaining_quantity), 0), 0)
+             FROM product_batches WHERE product_id = ?1 AND remaining_quantity > 0",
+            params![product_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE products SET import_price = ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+            params![avg_cost, product_id],
+        )?;
+        Ok(())
     }
 
     pub fn get_products(&self) -> SqlResult<Vec<Product>> {
@@ -309,6 +360,19 @@ impl Database {
     pub fn update_product(&self, input: UpdateProduct) -> SqlResult<Product> {
         {
             let conn = self.conn.lock().unwrap();
+            // Khi còn tồn kho, `import_price` là giá vốn bình quân do hệ thống tự
+            // duy trì (theo nhập + FIFO) — không cho sửa tay để tránh sai định giá
+            // (Issue 15). Chỉ nhận `import_price` từ input khi tồn = 0.
+            let (stock, current_cost): (i64, f64) = conn.query_row(
+                "SELECT stock_quantity, import_price FROM products WHERE id = ?1",
+                params![input.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let import_price = if stock > 0 {
+                current_cost
+            } else {
+                input.import_price
+            };
             conn.execute(
                 "UPDATE products SET code=?1, name=?2, unit=?3, import_price=?4, export_price=?5, min_stock=?6, category=?7, description=?8, updated_at=datetime('now', 'localtime')
                  WHERE id=?9",
@@ -316,7 +380,7 @@ impl Database {
                     input.code,
                     input.name,
                     input.unit,
-                    input.import_price,
+                    import_price,
                     input.export_price,
                     input.min_stock,
                     input.category,
@@ -426,6 +490,28 @@ impl Database {
 
     pub fn delete_customer(&self, id: i64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
+        // Chặn xóa khi còn hóa đơn liên quan hoặc còn công nợ (Issue 9) — tránh
+        // phiếu mồ côi / mất dấu công nợ.
+        let referenced: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM export_receipts WHERE customer_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if referenced > 0 {
+            return Err(app_err(
+                "Không thể xóa khách hàng đang có hóa đơn liên quan.",
+            ));
+        }
+        let debt: f64 = conn
+            .query_row(
+                "SELECT debt FROM customers WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        if debt > 0.0 {
+            return Err(app_err("Không thể xóa khách hàng đang còn công nợ."));
+        }
         conn.execute("DELETE FROM customers WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -507,6 +593,17 @@ impl Database {
 
     pub fn delete_supplier(&self, id: i64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
+        // Chặn xóa khi còn phiếu nhập liên quan (Issue 9).
+        let referenced: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM import_receipts WHERE supplier_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if referenced > 0 {
+            return Err(app_err(
+                "Không thể xóa nhà cung cấp đang có phiếu nhập liên quan.",
+            ));
+        }
         conn.execute("DELETE FROM suppliers WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -522,6 +619,20 @@ impl Database {
     }
 
     pub fn create_import_receipt(&self, input: CreateImportReceipt) -> SqlResult<ImportReceipt> {
+        // Validation server-side (Issue 7): chặn phiếu rỗng / số lượng, giá không hợp lệ.
+        validate_receipt_header(&input.receipt_number, &input.date, input.items.len())?;
+        for item in &input.items {
+            if item.product_id <= 0 {
+                return Err(app_err("Dòng nhập thiếu sản phẩm hợp lệ."));
+            }
+            if item.quantity < 1 {
+                return Err(app_err("Số lượng nhập phải >= 1."));
+            }
+            if item.unit_price < 0.0 {
+                return Err(app_err("Đơn giá nhập không được âm."));
+            }
+        }
+
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
@@ -585,9 +696,9 @@ impl Database {
             )?;
 
             tx.execute(
-                "INSERT INTO product_batches (product_id, receipt_id, quantity, remaining_quantity, cost_price)
-                 VALUES (?1, ?2, ?3, ?3, ?4)",
-                params![item.product_id, receipt_id, item.quantity, item.unit_price],
+                "INSERT INTO product_batches (product_id, receipt_id, quantity, remaining_quantity, cost_price, import_date)
+                 VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+                params![item.product_id, receipt_id, item.quantity, item.unit_price, input.date],
             )?;
 
             tx.execute(
@@ -604,41 +715,66 @@ impl Database {
 
     pub fn get_import_receipts(&self) -> SqlResult<Vec<ImportReceipt>> {
         let conn = self.conn.lock().unwrap();
-        let receipts = {
+        // 1 query lấy header, 1 query lấy toàn bộ item rồi gom theo receipt_id
+        // trong Rust — tránh N+1 (Issue 17).
+        let mut receipts: Vec<ImportReceipt> = {
             let mut stmt = conn.prepare(
-                "SELECT id, receipt_number, date, supplier, note, total_amount, created_at
+                "SELECT id, receipt_number, date, supplier, supplier_id, note, total_amount, created_at
                  FROM import_receipts ORDER BY date DESC, id DESC",
             )?;
-
             let rows = stmt
                 .query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, f64>(5)?,
-                        row.get::<_, String>(6)?,
-                    ))
+                    Ok(ImportReceipt {
+                        id: row.get(0)?,
+                        receipt_number: row.get(1)?,
+                        date: row.get(2)?,
+                        supplier: row.get(3)?,
+                        supplier_id: row.get(4)?,
+                        note: row.get(5)?,
+                        total_amount: row.get(6)?,
+                        created_at: row.get(7)?,
+                        items: vec![],
+                    })
                 })?
                 .collect::<SqlResult<Vec<_>>>()?;
             rows
         };
 
-        drop(conn);
-        let mut result = Vec::new();
-        for (id, receipt_number, date, supplier, note, total_amount, created_at) in receipts {
-            let mut receipt = self.get_import_receipt(id)?;
-            receipt.receipt_number = receipt_number;
-            receipt.date = date;
-            receipt.supplier = supplier;
-            receipt.note = note;
-            receipt.total_amount = total_amount;
-            receipt.created_at = created_at;
-            result.push(receipt);
+        let mut items_by_receipt: HashMap<i64, Vec<ImportItem>> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT ii.id, ii.receipt_id, ii.product_id, p.name, p.code, ii.quantity, ii.unit_price, ii.total_price
+                 FROM import_items ii
+                 JOIN products p ON p.id = ii.product_id
+                 ORDER BY ii.id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ImportItem {
+                    id: row.get(0)?,
+                    receipt_id: row.get(1)?,
+                    product_id: row.get(2)?,
+                    product_name: row.get(3)?,
+                    product_code: row.get(4)?,
+                    quantity: row.get(5)?,
+                    unit_price: row.get(6)?,
+                    total_price: row.get(7)?,
+                })
+            })?;
+            for item in rows {
+                let item = item?;
+                items_by_receipt
+                    .entry(item.receipt_id)
+                    .or_default()
+                    .push(item);
+            }
         }
-        Ok(result)
+
+        for receipt in &mut receipts {
+            if let Some(items) = items_by_receipt.remove(&receipt.id) {
+                receipt.items = items;
+            }
+        }
+        Ok(receipts)
     }
 
     fn get_import_receipt(&self, id: i64) -> SqlResult<ImportReceipt> {
@@ -688,18 +824,43 @@ impl Database {
     }
 
     pub fn create_export_receipt(&self, input: CreateExportReceipt) -> SqlResult<ExportReceipt> {
+        // Validation server-side (Issue 7).
+        validate_receipt_header(&input.receipt_number, &input.date, input.items.len())?;
+        for item in &input.items {
+            if item.product_id <= 0 {
+                return Err(app_err("Dòng xuất thiếu sản phẩm hợp lệ."));
+            }
+            if item.quantity < 1 {
+                return Err(app_err("Số lượng xuất phải >= 1."));
+            }
+            if item.unit_price < 0.0 {
+                return Err(app_err("Đơn giá xuất không được âm."));
+            }
+        }
+        if input.discount < 0.0 {
+            return Err(app_err("Chiết khấu không được âm."));
+        }
+        if input.amount_paid < 0.0 {
+            return Err(app_err("Số tiền thanh toán không được âm."));
+        }
+
         let mut conn = self.conn.lock().unwrap();
 
+        // Kiểm tra tồn theo TỔNG số lượng mỗi sản phẩm trong phiếu (Issue 4): nhiều
+        // dòng cùng 1 sản phẩm phải cộng dồn, tránh lọt qua rồi âm tồn.
+        let mut wanted: HashMap<i64, i64> = HashMap::new();
         for item in &input.items {
-            let stock: i64 = conn.query_row(
-                "SELECT stock_quantity FROM products WHERE id = ?1",
-                params![item.product_id],
-                |row| row.get(0),
+            *wanted.entry(item.product_id).or_insert(0) += item.quantity;
+        }
+        for (product_id, need) in &wanted {
+            let (code, stock): (String, i64) = conn.query_row(
+                "SELECT code, stock_quantity FROM products WHERE id = ?1",
+                params![product_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            if stock < item.quantity {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
-                    "Sản phẩm ID {} không đủ tồn kho (còn {})",
-                    item.product_id, stock
+            if stock < *need {
+                return Err(app_err(format!(
+                    "Không đủ tồn kho cho sản phẩm {code}. Cần {need}, còn {stock}."
                 )));
             }
         }
@@ -741,12 +902,16 @@ impl Database {
         )?;
         let receipt_id = tx.last_insert_rowid();
 
-        // Cập nhật tổng mua & công nợ khách hàng (phần chưa thanh toán).
+        // Cập nhật tổng mua & công nợ khách hàng.
+        // `amount_paid` là TIỀN KHÁCH ĐƯA (tender), có thể lớn hơn hóa đơn khi thối
+        // lại. Công nợ chỉ tính phần còn thiếu của CHÍNH hóa đơn này, nên phải kẹp
+        // số đã áp vào [0, total_amount] — không dùng tiền thừa trừ nợ cũ (Issue 1).
         if let Some(cid) = input.customer_id {
-            let remaining = total_amount - input.amount_paid;
+            let applied = input.amount_paid.clamp(0.0, total_amount);
+            let remaining_for_debt = (total_amount - applied).max(0.0);
             tx.execute(
                 "UPDATE customers SET total_spent = total_spent + ?1, debt = debt + ?2, updated_at = datetime('now', 'localtime') WHERE id = ?3",
-                params![total_amount, remaining, cid],
+                params![total_amount, remaining_for_debt, cid],
             )?;
         }
 
@@ -773,6 +938,9 @@ impl Database {
                 params![item.quantity, item.product_id],
             )?;
 
+            // Sau khi tiêu thụ lô, tính lại giá vốn bình quân từ lô còn lại (Issue 5).
+            Self::recompute_avg_cost(&tx, item.product_id)?;
+
             tx.execute(
                 "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
                  VALUES (?1, 'export', ?2, ?3)",
@@ -787,41 +955,69 @@ impl Database {
 
     pub fn get_export_receipts(&self) -> SqlResult<Vec<ExportReceipt>> {
         let conn = self.conn.lock().unwrap();
-        let receipts = {
+        // 1 query header + 1 query item, gom trong Rust — tránh N+1 (Issue 17).
+        let mut receipts: Vec<ExportReceipt> = {
             let mut stmt = conn.prepare(
-                "SELECT id, receipt_number, date, customer, note, total_amount, created_at
+                "SELECT id, receipt_number, date, customer, customer_id, discount, amount_paid, payment_method, note, total_amount, created_at
                  FROM export_receipts ORDER BY date DESC, id DESC",
             )?;
-
             let rows = stmt
                 .query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, f64>(5)?,
-                        row.get::<_, String>(6)?,
-                    ))
+                    Ok(ExportReceipt {
+                        id: row.get(0)?,
+                        receipt_number: row.get(1)?,
+                        date: row.get(2)?,
+                        customer: row.get(3)?,
+                        customer_id: row.get(4)?,
+                        discount: row.get(5)?,
+                        amount_paid: row.get(6)?,
+                        payment_method: row.get(7)?,
+                        note: row.get(8)?,
+                        total_amount: row.get(9)?,
+                        created_at: row.get(10)?,
+                        items: vec![],
+                    })
                 })?
                 .collect::<SqlResult<Vec<_>>>()?;
             rows
         };
 
-        drop(conn);
-        let mut result = Vec::new();
-        for (id, receipt_number, date, customer, note, total_amount, created_at) in receipts {
-            let mut receipt = self.get_export_receipt(id)?;
-            receipt.receipt_number = receipt_number;
-            receipt.date = date;
-            receipt.customer = customer;
-            receipt.note = note;
-            receipt.total_amount = total_amount;
-            receipt.created_at = created_at;
-            result.push(receipt);
+        let mut items_by_receipt: HashMap<i64, Vec<ExportItem>> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT ei.id, ei.receipt_id, ei.product_id, p.name, p.code, ei.quantity, ei.unit_price, ei.total_price, ei.cost_price
+                 FROM export_items ei
+                 JOIN products p ON p.id = ei.product_id
+                 ORDER BY ei.id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ExportItem {
+                    id: row.get(0)?,
+                    receipt_id: row.get(1)?,
+                    product_id: row.get(2)?,
+                    product_name: row.get(3)?,
+                    product_code: row.get(4)?,
+                    quantity: row.get(5)?,
+                    unit_price: row.get(6)?,
+                    total_price: row.get(7)?,
+                    cost_price: row.get(8)?,
+                })
+            })?;
+            for item in rows {
+                let item = item?;
+                items_by_receipt
+                    .entry(item.receipt_id)
+                    .or_default()
+                    .push(item);
+            }
         }
-        Ok(result)
+
+        for receipt in &mut receipts {
+            if let Some(items) = items_by_receipt.remove(&receipt.id) {
+                receipt.items = items;
+            }
+        }
+        Ok(receipts)
     }
 
     fn get_export_receipt(&self, id: i64) -> SqlResult<ExportReceipt> {
@@ -898,11 +1094,19 @@ impl Database {
             [],
             |row| row.get(0),
         )?;
+        // Lợi nhuận = (doanh thu dòng - giá vốn FIFO) - chiết khấu cấp phiếu (Issue 2+3).
+        // Trừ discount MỘT lần/phiếu, không nhân theo số dòng.
         let profit_month: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(ei.total_price - ei.quantity * ei.cost_price), 0)
-             FROM export_items ei
-             JOIN export_receipts er ON er.id = ei.receipt_id
-             WHERE strftime('%Y-%m', er.date) = strftime('%Y-%m', 'now', 'localtime')",
+            "SELECT COALESCE((
+                 SELECT SUM(ei.total_price - ei.quantity * ei.cost_price)
+                 FROM export_items ei
+                 JOIN export_receipts er ON er.id = ei.receipt_id
+                 WHERE strftime('%Y-%m', er.date) = strftime('%Y-%m', 'now', 'localtime')
+             ), 0)
+             - COALESCE((
+                 SELECT SUM(discount) FROM export_receipts
+                 WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+             ), 0)",
             [],
             |row| row.get(0),
         )?;
@@ -919,17 +1123,21 @@ impl Database {
 
     pub fn get_profit_report(&self, from: &str, to: &str) -> SqlResult<ProfitReport> {
         let conn = self.conn.lock().unwrap();
+        // Doanh thu từng SP đã trừ chiết khấu phiếu, phân bổ theo tỷ lệ
+        // (line_total / tổng dòng của phiếu) — Issue 2+3.
         let mut stmt = conn.prepare(
             "SELECT ei.product_id, p.code, p.name,
                     SUM(ei.quantity) AS qty,
-                    SUM(ei.total_price) AS revenue,
+                    SUM(ei.total_price - COALESCE(er.discount * ei.total_price / NULLIF(rt.items_total, 0), 0)) AS revenue,
                     SUM(ei.quantity * ei.cost_price) AS cost
              FROM export_items ei
              JOIN export_receipts er ON er.id = ei.receipt_id
              JOIN products p ON p.id = ei.product_id
+             JOIN (SELECT receipt_id, SUM(total_price) AS items_total
+                   FROM export_items GROUP BY receipt_id) rt ON rt.receipt_id = ei.receipt_id
              WHERE er.date BETWEEN ?1 AND ?2
              GROUP BY ei.product_id, p.code, p.name
-             ORDER BY (SUM(ei.total_price) - SUM(ei.quantity * ei.cost_price)) DESC",
+             ORDER BY (SUM(ei.total_price - COALESCE(er.discount * ei.total_price / NULLIF(rt.items_total, 0), 0)) - SUM(ei.quantity * ei.cost_price)) DESC",
         )?;
 
         let by_product = stmt
@@ -1018,4 +1226,286 @@ pub fn init_database(app: &AppHandle) -> SqlResult<Database> {
         .expect("failed to resolve app data directory");
     let db_path = data_dir.join("inventory.db");
     Database::new(db_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl Database {
+        /// DB in-memory cho test (schema đầy đủ như bản thật).
+        fn new_memory() -> Self {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+            let db = Self {
+                conn: Mutex::new(conn),
+            };
+            db.init_schema().unwrap();
+            db
+        }
+    }
+
+    fn product(db: &Database, code: &str, export_price: f64) -> i64 {
+        db.create_product(CreateProduct {
+            code: code.to_string(),
+            name: format!("SP {code}"),
+            unit: "cái".to_string(),
+            import_price: 0.0,
+            export_price,
+            min_stock: 0,
+            category: None,
+            description: None,
+        })
+        .unwrap()
+        .id
+    }
+
+    fn import(db: &Database, no: &str, date: &str, pid: i64, qty: i64, price: f64) {
+        db.create_import_receipt(CreateImportReceipt {
+            receipt_number: no.to_string(),
+            date: date.to_string(),
+            supplier: None,
+            supplier_id: None,
+            note: None,
+            items: vec![ImportItemInput {
+                product_id: pid,
+                quantity: qty,
+                unit_price: price,
+            }],
+        })
+        .unwrap();
+    }
+
+    fn export_items(
+        db: &Database,
+        no: &str,
+        date: &str,
+        customer_id: Option<i64>,
+        discount: f64,
+        amount_paid: f64,
+        items: Vec<ExportItemInput>,
+    ) -> SqlResult<ExportReceipt> {
+        db.create_export_receipt(CreateExportReceipt {
+            receipt_number: no.to_string(),
+            date: date.to_string(),
+            customer: None,
+            customer_id,
+            discount,
+            amount_paid,
+            payment_method: "cash".to_string(),
+            note: None,
+            items,
+        })
+    }
+
+    fn stock(db: &Database, pid: i64) -> i64 {
+        db.get_product_by_id(pid).unwrap().stock_quantity
+    }
+    fn avg_cost(db: &Database, pid: i64) -> f64 {
+        db.get_product_by_id(pid).unwrap().import_price
+    }
+
+    // Issue 5 + 8: FIFO theo ngày phiếu, giá vốn dòng đúng lô, giá vốn BQ tính lại.
+    #[test]
+    fn fifo_cost_and_recomputed_avg_cost() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        import(&db, "PN2", "2026-01-02", p, 10, 20.0);
+        assert_eq!(stock(&db, p), 20);
+        assert!((avg_cost(&db, p) - 15.0).abs() < 1e-9); // BQ (10*10+10*20)/20
+
+        let rec = export_items(
+            &db,
+            "HD1",
+            "2026-01-03",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 10,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        // Xuất 10 → tiêu thụ lô rẻ (@10) trước.
+        assert!((rec.items[0].cost_price - 10.0).abs() < 1e-9);
+        assert_eq!(stock(&db, p), 10);
+        // Giá vốn BQ tính lại từ lô còn lại (@20).
+        assert!((avg_cost(&db, p) - 20.0).abs() < 1e-9);
+    }
+
+    // Issue 1: tender > total, có khách → công nợ KHÔNG bị trừ.
+    #[test]
+    fn debt_not_reduced_when_overpaid() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 50.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            100.0, // đưa dư
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 1,
+                unit_price: 50.0,
+            }],
+        )
+        .unwrap();
+        let debt = db.get_customer_by_id(c).unwrap().debt;
+        assert!(debt.abs() < 1e-9, "debt phải = 0, thực tế {debt}");
+    }
+
+    // Issue 1: tender < total, có khách → công nợ tăng đúng phần còn thiếu.
+    #[test]
+    fn debt_increases_by_remaining() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 50.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            20.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 1,
+                unit_price: 50.0,
+            }],
+        )
+        .unwrap();
+        let debt = db.get_customer_by_id(c).unwrap().debt;
+        assert!((debt - 30.0).abs() < 1e-9, "debt phải = 30, thực tế {debt}");
+    }
+
+    // Issue 4: 2 dòng cùng SP vượt tồn → reject, tồn không đổi.
+    #[test]
+    fn aggregate_stock_check_rejects_overselling() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 50.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let res = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            None,
+            0.0,
+            0.0,
+            vec![
+                ExportItemInput {
+                    product_id: p,
+                    quantity: 6,
+                    unit_price: 50.0,
+                },
+                ExportItemInput {
+                    product_id: p,
+                    quantity: 6,
+                    unit_price: 50.0,
+                },
+            ],
+        );
+        assert!(res.is_err());
+        assert_eq!(stock(&db, p), 10, "tồn không được đổi khi reject");
+    }
+
+    // Issue 7: items rỗng / số lượng <= 0 → Err.
+    #[test]
+    fn validation_rejects_bad_input() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 50.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        // rỗng
+        assert!(export_items(&db, "HD1", "2026-01-02", None, 0.0, 0.0, vec![]).is_err());
+        // qty <= 0
+        assert!(export_items(
+            &db,
+            "HD2",
+            "2026-01-02",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 0,
+                unit_price: 50.0,
+            }],
+        )
+        .is_err());
+        // import qty âm
+        assert!(db
+            .create_import_receipt(CreateImportReceipt {
+                receipt_number: "PN2".into(),
+                date: "2026-01-02".into(),
+                supplier: None,
+                supplier_id: None,
+                note: None,
+                items: vec![ImportItemInput {
+                    product_id: p,
+                    quantity: -1,
+                    unit_price: 10.0,
+                }],
+            })
+            .is_err());
+        assert_eq!(stock(&db, p), 10);
+    }
+
+    // Issue 2+3: báo cáo lợi nhuận trừ chiết khấu phiếu.
+    #[test]
+    fn profit_report_subtracts_discount() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-06-01", p, 10, 40.0);
+        export_items(
+            &db,
+            "HD1",
+            "2026-06-15",
+            None,
+            10.0, // chiết khấu phiếu
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 1,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        let rep = db.get_profit_report("2026-06-01", "2026-06-30").unwrap();
+        // Doanh thu 100 - CK 10 = 90; giá vốn 40; LN 50.
+        assert!(
+            (rep.total_revenue - 90.0).abs() < 1e-9,
+            "revenue {}",
+            rep.total_revenue
+        );
+        assert!(
+            (rep.total_profit - 50.0).abs() < 1e-9,
+            "profit {}",
+            rep.total_profit
+        );
+    }
 }

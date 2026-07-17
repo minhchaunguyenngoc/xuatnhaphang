@@ -6,7 +6,6 @@ import { toast } from "sonner";
 
 import { SupplierFormDialog } from "@/components/suppliers/supplier-form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -48,7 +47,7 @@ export default function SuppliersPage() {
     <div>
       <PageHeader
         title="Nhà cung cấp"
-        description="Quản lý nhà cung cấp, theo dõi tổng nhập và công nợ phải trả"
+        description="Quản lý nhà cung cấp và theo dõi tổng giá trị đã nhập"
         action={
           <Button
             onClick={() => {
@@ -71,14 +70,13 @@ export default function SuppliersPage() {
               <TableHead>Điện thoại</TableHead>
               <TableHead>Địa chỉ</TableHead>
               <TableHead className="text-right">Tổng nhập</TableHead>
-              <TableHead className="text-right">Công nợ</TableHead>
               <TableHead className="text-right">Thao tác</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {suppliers.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
                   Chưa có nhà cung cấp nào.
                 </TableCell>
               </TableRow>
@@ -93,15 +91,6 @@ export default function SuppliersPage() {
                   </TableCell>
                   <TableCell className="text-right">
                     {formatCurrency(supplier.total_purchased)}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {supplier.debt > 0 ? (
-                      <Badge variant="destructive">
-                        {formatCurrency(supplier.debt)}
-                      </Badge>
-                    ) : (
-                      formatCurrency(supplier.debt)
-                    )}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">

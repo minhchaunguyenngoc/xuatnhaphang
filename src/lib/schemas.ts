@@ -27,24 +27,12 @@ export const supplierSchema = z.object({
   note: z.string().optional(),
 });
 
+// Schema cho từng dòng hàng, dùng chung cho form phiếu nhập/xuất
+// (receipt-form-dialog tự ghép phần header của phiếu). Các schema phiếu đầy đủ
+// trước đây bị bỏ không dùng và thiếu field POS nên đã gỡ để tránh nhầm lẫn
+// (Issue 18) — nguồn chuẩn là kiểu CreateImportReceipt/CreateExportReceipt.
 export const receiptItemSchema = z.object({
   product_id: z.number().min(1, "Chọn sản phẩm"),
   quantity: z.number().min(1, "Số lượng phải >= 1"),
   unit_price: z.number().min(0, "Đơn giá phải >= 0"),
-});
-
-export const importReceiptSchema = z.object({
-  receipt_number: z.string().min(1, "Số phiếu không được để trống"),
-  date: z.string().min(1, "Ngày không được để trống"),
-  supplier: z.string().optional(),
-  note: z.string().optional(),
-  items: z.array(receiptItemSchema).min(1, "Cần ít nhất 1 sản phẩm"),
-});
-
-export const exportReceiptSchema = z.object({
-  receipt_number: z.string().min(1, "Số phiếu không được để trống"),
-  date: z.string().min(1, "Ngày không được để trống"),
-  customer: z.string().optional(),
-  note: z.string().optional(),
-  items: z.array(receiptItemSchema).min(1, "Cần ít nhất 1 sản phẩm"),
 });

@@ -7,12 +7,29 @@ function normalizeKey(key: string): string {
   return key.trim().toLowerCase();
 }
 
-/** Đọc số từ ô Excel (chấp nhận "1.000", "1,000", khoảng trắng). */
+/**
+ * Đọc số từ ô Excel theo quy ước VN (Issue 11). Ưu tiên ô đã là số. Với chuỗi:
+ * - Có cả "." và "," → "." là ngăn cách nghìn, "," là thập phân: "1.234,5" → 1234.5
+ * - Chỉ có "," → thập phân: "12,5" → 12.5
+ * - Chỉ có "." → ngăn cách nghìn kiểu VN: "1.000" → 1000
+ */
 function toNumber(value: unknown): number {
-  if (typeof value === "number") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
   if (typeof value === "string") {
-    const cleaned = value.replace(/[^\d.-]/g, "");
-    const n = Number(cleaned);
+    let s = value.trim();
+    if (!s) return 0;
+    // Bỏ ký tự tiền tệ / khoảng trắng, giữ lại chữ số, dấu chấm/phẩy và dấu âm.
+    s = s.replace(/[^\d.,-]/g, "");
+    const hasDot = s.includes(".");
+    const hasComma = s.includes(",");
+    if (hasDot && hasComma) {
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else if (hasComma) {
+      s = s.replace(",", ".");
+    } else if (hasDot) {
+      s = s.replace(/\./g, "");
+    }
+    const n = Number(s);
     return Number.isFinite(n) ? n : 0;
   }
   return 0;

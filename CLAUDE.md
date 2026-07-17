@@ -43,10 +43,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Profit Logic (FIFO Costing)
 
-- Mỗi phiếu nhập tạo 1 dòng `product_batches` (product_id, quantity, remaining_quantity, cost_price, ngày nhập). Giá vốn bình quân trên `products.import_price` được cập nhật theo trọng số tồn kho hiện tại.
-- Khi xuất hàng, tiêu thụ batch theo thứ tự nhập trước (FIFO); giá vốn thực tế của từng dòng xuất được lưu vào `export_items.cost_price`.
-- Lợi nhuận dòng = (unit_price - cost_price) * quantity; lợi nhuận đơn/kỳ = tổng lợi nhuận các dòng trong khoảng thời gian đó (không phải tổng xuất trừ tổng nhập).
-- Báo cáo lợi nhuận theo sản phẩm/kỳ dùng command `get_profit_report`, group theo product, tính margin %.
+- Mỗi phiếu nhập tạo 1 dòng `product_batches` (product_id, quantity, remaining_quantity, cost_price, `import_date` = ngày phiếu). Giá vốn bình quân trên `products.import_price` được cập nhật theo trọng số tồn kho hiện tại khi nhập.
+- Khi xuất hàng, tiêu thụ batch theo thứ tự **ngày phiếu nhập** (FIFO theo `import_date`, không theo thời điểm insert); giá vốn thực tế của từng dòng xuất được lưu vào `export_items.cost_price`. Thiếu lô để tiêu thụ → báo lỗi (không lấy giá vốn tạm).
+- Sau mỗi lần xuất, `products.import_price` được **tính lại** từ các lô còn tồn (`recompute_avg_cost`); hết lô → 0. Do đó khi còn tồn kho, `import_price` là giá vốn hệ thống quản lý và không cho sửa tay (UI khóa ô + backend giữ giá cũ trong `update_product`).
+- Lợi nhuận dòng = (unit_price - cost_price) * quantity. Lợi nhuận đơn/kỳ = tổng lợi nhuận các dòng **trừ chiết khấu cấp phiếu** (`export_receipts.discount`), không phải tổng xuất trừ tổng nhập.
+- Báo cáo lợi nhuận theo sản phẩm/kỳ dùng command `get_profit_report`, group theo product, tính margin %. Chiết khấu phiếu được **phân bổ theo tỷ lệ** `line_total / tổng dòng của phiếu` để trừ vào doanh thu từng sản phẩm; dashboard trừ discount một lần mỗi phiếu.
+- Công nợ khách khi bán: chỉ tính phần còn thiếu của chính hóa đơn (`amount_paid` là tiền khách đưa nên được kẹp về `[0, total_amount]` trước khi tính nợ) — tiền thừa không trừ nợ cũ.
 
 ## Security & Local Rules
 

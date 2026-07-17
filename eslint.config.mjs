@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Tauri (Rust) crate + build artifacts — không phải mã nguồn frontend.
+    "src-tauri/**",
   ]),
 ]);
 
