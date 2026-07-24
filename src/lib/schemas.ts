@@ -1,7 +1,9 @@
 import { z } from "zod";
 
 export const productSchema = z.object({
-  code: z.string().min(1, "Mã sản phẩm không được để trống"),
+  // Để trống → backend tự sinh mã (SP0001, ...), hoặc dùng lại mã của sản
+  // phẩm đã có nếu trùng tên + giá nhập + giá xuất.
+  code: z.string().optional(),
   name: z.string().min(1, "Tên sản phẩm không được để trống"),
   unit: z.string().min(1, "Đơn vị không được để trống"),
   import_price: z.number().min(0, "Giá nhập phải >= 0"),

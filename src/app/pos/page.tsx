@@ -115,14 +115,6 @@ export default function PosPage() {
     );
   }
 
-  function updatePrice(productId: number, price: number) {
-    setCart((prev) =>
-      prev.map((i) =>
-        i.product_id === productId ? { ...i, unit_price: Math.max(price, 0) } : i,
-      ),
-    );
-  }
-
   function removeItem(productId: number) {
     setCart((prev) => prev.filter((i) => i.product_id !== productId));
   }
@@ -236,15 +228,9 @@ export default function PosPage() {
                         <Plus className="h-3 w-3" />
                       </Button>
                     </div>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={item.unit_price}
-                      onChange={(e) =>
-                        updatePrice(item.product_id, Number(e.target.value) || 0)
-                      }
-                      className="h-7 w-28 text-right"
-                    />
+                    <span className="w-28 shrink-0 text-right text-sm text-muted-foreground">
+                      {formatCurrency(item.unit_price)}
+                    </span>
                     <span className="w-28 shrink-0 text-right text-sm font-medium">
                       {formatCurrency(item.quantity * item.unit_price)}
                     </span>

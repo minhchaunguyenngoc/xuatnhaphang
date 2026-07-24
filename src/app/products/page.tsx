@@ -1,14 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Download, FileUp, Pencil, Plus, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ProductFormDialog } from "@/components/products/product-form-dialog";
-import {
-  downloadProductTemplate,
-  parseProductsFromExcel,
-} from "@/lib/import-excel";
 import { PageHeader } from "@/components/shared/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,47 +25,23 @@ import {
 } from "@/components/ui/table";
 import { formatCurrency, formatNumber } from "@/lib/format";
 import type { Product } from "@/lib/types";
+import { useAuthStore } from "@/stores/auth-store";
 import { useInventoryStore } from "@/stores/inventory-store";
 
 export default function ProductsPage() {
-  const {
-    products,
-    fetchProducts,
-    createProduct,
-    updateProduct,
-    deleteProduct,
-    importProducts,
-  } = useInventoryStore();
+  const canManageProducts = useAuthStore((state) =>
+    state.hasPermission("products.manage"),
+  );
+  const { products, fetchProducts, createProduct, updateProduct, deleteProduct } =
+    useInventoryStore();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void fetchProducts();
   }, [fetchProducts]);
-
-  async function handleImportFile(file: File) {
-    setImporting(true);
-    try {
-      const { products: parsed, skipped } = await parseProductsFromExcel(file);
-      if (parsed.length === 0) {
-        toast.error("Không đọc được dòng hợp lệ nào (cần cột Mã SP và Tên SP)");
-        return;
-      }
-      const { ok, failed } = await importProducts(parsed);
-      const parts = [`Đã nhập ${ok} sản phẩm`];
-      if (failed > 0) parts.push(`${failed} lỗi/trùng mã`);
-      if (skipped > 0) parts.push(`${skipped} dòng thiếu mã/tên`);
-      toast.success(parts.join(" · "));
-    } catch {
-      toast.error("Không thể đọc file Excel");
-    } finally {
-      setImporting(false);
-    }
-  }
 
   return (
     <div>
@@ -77,30 +49,7 @@ export default function ProductsPage() {
         title="Hàng hóa"
         description="Quản lý danh mục hàng hóa và mức tồn tối thiểu"
         action={
-          <div className="flex gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleImportFile(file);
-                e.target.value = "";
-              }}
-            />
-            <Button variant="outline" onClick={() => downloadProductTemplate()}>
-              <Download className="mr-2 h-4 w-4" />
-              Tải file mẫu
-            </Button>
-            <Button
-              variant="outline"
-              disabled={importing}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <FileUp className="mr-2 h-4 w-4" />
-              {importing ? "Đang nhập..." : "Nhập Excel"}
-            </Button>
+          canManageProducts ? (
             <Button
               onClick={() => {
                 setEditingProduct(null);
@@ -110,7 +59,7 @@ export default function ProductsPage() {
               <Plus className="mr-2 h-4 w-4" />
               Thêm hàng hóa
             </Button>
-          </div>
+          ) : null
         }
       />
 
@@ -157,25 +106,27 @@ export default function ProductsPage() {
                   </TableCell>
                   <TableCell>{product.category ?? "-"}</TableCell>
                   <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        onClick={() => {
-                          setEditingProduct(product);
-                          setDialogOpen(true);
-                        }}
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        onClick={() => setDeleteTarget(product)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
+                    {canManageProducts ? (
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => {
+                            setEditingProduct(product);
+                            setDialogOpen(true);
+                          }}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => setDeleteTarget(product)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ) : null}
                   </TableCell>
                 </TableRow>
               ))
@@ -191,7 +142,11 @@ export default function ProductsPage() {
         onSubmit={async (values) => {
           try {
             if (editingProduct) {
-              await updateProduct({ id: editingProduct.id, ...values });
+              await updateProduct({
+                id: editingProduct.id,
+                ...values,
+                code: values.code || editingProduct.code,
+              });
               toast.success("Đã cập nhật sản phẩm");
             } else {
               await createProduct(values);

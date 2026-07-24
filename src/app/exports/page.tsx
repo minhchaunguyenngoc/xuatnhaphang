@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, Printer } from "lucide-react";
+import { Plus, Printer, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { InvoicePrintDialog } from "@/components/receipts/invoice-print-dialog";
 import { ReceiptFormDialog } from "@/components/receipts/receipt-form-dialog";
+import { ReturnFormDialog } from "@/components/receipts/return-form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,9 +19,14 @@ import {
 } from "@/components/ui/table";
 import { formatCurrency, formatDate } from "@/lib/format";
 import type { ExportReceipt } from "@/lib/types";
+import { useAuthStore } from "@/stores/auth-store";
 import { useInventoryStore } from "@/stores/inventory-store";
+import { useReturnsStore } from "@/stores/returns-store";
 
 export default function ExportsPage() {
+  const hasPermission = useAuthStore((state) => state.hasPermission);
+  const canCreate = hasPermission("exports.create");
+  const canReturn = hasPermission("returns.customer");
   const {
     exportReceipts,
     products,
@@ -28,16 +34,24 @@ export default function ExportsPage() {
     fetchExportReceipts,
     fetchProducts,
     fetchCustomers,
+    fetchDashboard,
+    fetchInventoryHistory,
     createExportReceipt,
   } = useInventoryStore();
+  const { returnReceipts, fetchReturnReceipts, createCustomerReturn } =
+    useReturnsStore();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [printReceipt, setPrintReceipt] = useState<ExportReceipt | null>(null);
+  const [returningReceipt, setReturningReceipt] = useState<ExportReceipt | null>(
+    null,
+  );
 
   useEffect(() => {
     void fetchExportReceipts();
     void fetchProducts();
     void fetchCustomers();
-  }, [fetchExportReceipts, fetchProducts, fetchCustomers]);
+    void fetchReturnReceipts();
+  }, [fetchExportReceipts, fetchProducts, fetchCustomers, fetchReturnReceipts]);
 
   return (
     <div>
@@ -45,10 +59,12 @@ export default function ExportsPage() {
         title="Hóa đơn bán hàng"
         description="Danh sách hóa đơn bán/xuất kho. Bán nhanh tại màn hình Bán hàng (POS)."
         action={
-          <Button onClick={() => setDialogOpen(true)} disabled={products.length === 0}>
-            <Plus className="mr-2 h-4 w-4" />
-            Tạo hóa đơn
-          </Button>
+          canCreate ? (
+            <Button onClick={() => setDialogOpen(true)} disabled={products.length === 0}>
+              <Plus className="mr-2 h-4 w-4" />
+              Tạo hóa đơn
+            </Button>
+          ) : null
         }
       />
 
@@ -95,6 +111,16 @@ export default function ExportsPage() {
                     {receipt.note ?? "-"}
                   </TableCell>
                   <TableCell className="text-right">
+                    {canReturn ? (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        title="Trả hàng"
+                        onClick={() => setReturningReceipt(receipt)}
+                      >
+                        <Undo2 className="h-4 w-4" />
+                      </Button>
+                    ) : null}
                     <Button
                       size="icon"
                       variant="ghost"
@@ -150,6 +176,29 @@ export default function ExportsPage() {
           } catch (error) {
             toast.error(
               error instanceof Error ? error.message : "Không thể tạo phiếu xuất",
+            );
+            throw error;
+          }
+        }}
+      />
+
+      <ReturnFormDialog
+        key={returningReceipt ? returningReceipt.id : "closed"}
+        open={!!returningReceipt}
+        onOpenChange={(open) => {
+          if (!open) setReturningReceipt(null);
+        }}
+        returnType="customer"
+        originalReceipt={returningReceipt}
+        returnReceipts={returnReceipts}
+        onSubmit={async (values) => {
+          try {
+            await createCustomerReturn(values);
+            await Promise.all([fetchDashboard(), fetchInventoryHistory(), fetchCustomers()]);
+            toast.success("Đã tạo phiếu trả hàng");
+          } catch (error) {
+            toast.error(
+              error instanceof Error ? error.message : "Không thể tạo phiếu trả hàng",
             );
             throw error;
           }

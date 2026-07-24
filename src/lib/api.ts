@@ -2,27 +2,39 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   CreateCustomer,
+  CreateCustomerReturn,
   CreateExportReceipt,
   CreateImportReceipt,
   CreateProduct,
   CreateSupplier,
+  CreateSupplierReturn,
+  CreateUser,
   Customer,
   DashboardStats,
   ExportReceipt,
   ImportReceipt,
   InventoryHistory,
+  LoginInput,
+  Permission,
   Product,
   ProfitReport,
+  ReturnReceipt,
   Supplier,
   UpdateCustomer,
+  UpdateImportReceipt,
   UpdateProduct,
   UpdateSupplier,
+  UpdateUser,
+  User,
 } from "./types";
 
 export const api = {
   getProducts: () => invoke<Product[]>("get_products"),
   createProduct: (input: CreateProduct) =>
-    invoke<Product>("create_product", { input }),
+    // Backend yêu cầu field `code` luôn có mặt (String, không phải Option) —
+    // JSON.stringify tự bỏ key `undefined`, nên phải ép về "" để backend tự
+    // sinh mã đúng logic thay vì lỗi thiếu field.
+    invoke<Product>("create_product", { input: { ...input, code: input.code ?? "" } }),
   updateProduct: (input: UpdateProduct) =>
     invoke<Product>("update_product", { input }),
   deleteProduct: (id: number) => invoke<void>("delete_product", { id }),
@@ -41,9 +53,22 @@ export const api = {
   getImportReceipts: () => invoke<ImportReceipt[]>("get_import_receipts"),
   createImportReceipt: (input: CreateImportReceipt) =>
     invoke<ImportReceipt>("create_import_receipt", { input }),
+  updateImportReceipt: (input: UpdateImportReceipt) =>
+    invoke<ImportReceipt>("update_import_receipt", { input }),
   getExportReceipts: () => invoke<ExportReceipt[]>("get_export_receipts"),
   createExportReceipt: (input: CreateExportReceipt) =>
     invoke<ExportReceipt>("create_export_receipt", { input }),
+  getReturnReceipts: () => invoke<ReturnReceipt[]>("get_return_receipts"),
+  createCustomerReturn: (input: CreateCustomerReturn) =>
+    invoke<ReturnReceipt>("create_customer_return", { input }),
+  createSupplierReturn: (input: CreateSupplierReturn) =>
+    invoke<ReturnReceipt>("create_supplier_return", { input }),
+  getPermissions: () => invoke<Permission[]>("get_permissions"),
+  login: (input: LoginInput) => invoke<User>("login", { input }),
+  getUsers: () => invoke<User[]>("get_users"),
+  createUser: (input: CreateUser) => invoke<User>("create_user", { input }),
+  updateUser: (input: UpdateUser) => invoke<User>("update_user", { input }),
+  deleteUser: (id: number) => invoke<void>("delete_user", { id }),
   getDashboardStats: () => invoke<DashboardStats>("get_dashboard_stats"),
   getInventoryHistory: () =>
     invoke<InventoryHistory[]>("get_inventory_history"),

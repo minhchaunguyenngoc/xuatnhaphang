@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, FileUp, Plus, Printer } from "lucide-react";
+import { Download, FileUp, Pencil, Plus, Printer, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { InvoicePrintDialog } from "@/components/receipts/invoice-print-dialog";
 import { ReceiptFormDialog } from "@/components/receipts/receipt-form-dialog";
+import { ReturnFormDialog } from "@/components/receipts/return-form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,9 +23,16 @@ import {
 } from "@/components/ui/table";
 import { formatCurrency, formatDate } from "@/lib/format";
 import type { ImportReceipt } from "@/lib/types";
+import { useAuthStore } from "@/stores/auth-store";
 import { useInventoryStore } from "@/stores/inventory-store";
+import { useReturnsStore } from "@/stores/returns-store";
 
 export default function ImportsPage() {
+  const hasPermission = useAuthStore((state) => state.hasPermission);
+  const canCreate = hasPermission("imports.create");
+  const canEdit = hasPermission("imports.edit");
+  const canReturn = hasPermission("returns.supplier");
+
   const {
     importReceipts,
     products,
@@ -32,10 +40,19 @@ export default function ImportsPage() {
     fetchImportReceipts,
     fetchProducts,
     fetchSuppliers,
+    fetchDashboard,
+    fetchInventoryHistory,
     createImportReceipt,
+    updateImportReceipt,
   } = useInventoryStore();
+  const { returnReceipts, fetchReturnReceipts, createSupplierReturn } =
+    useReturnsStore();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<ImportReceipt | null>(null);
   const [printReceipt, setPrintReceipt] = useState<ImportReceipt | null>(null);
+  const [returningReceipt, setReturningReceipt] = useState<ImportReceipt | null>(
+    null,
+  );
   const [importing, setImporting] = useState(false);
   const [excelItems, setExcelItems] = useState<
     { product_id: number; quantity: number; unit_price: number }[]
@@ -46,7 +63,8 @@ export default function ImportsPage() {
     void fetchImportReceipts();
     void fetchProducts();
     void fetchSuppliers();
-  }, [fetchImportReceipts, fetchProducts, fetchSuppliers]);
+    void fetchReturnReceipts();
+  }, [fetchImportReceipts, fetchProducts, fetchSuppliers, fetchReturnReceipts]);
 
   async function handleImportFile(file: File) {
     setImporting(true);
@@ -68,8 +86,8 @@ export default function ImportsPage() {
       if (unknownCodes.length > 0)
         parts.push(`bỏ ${unknownCodes.length} mã lạ: ${unknownCodes.join(", ")}`);
       toast.success(parts.join(" · "));
-      // Điền sẵn vào form để người dùng chọn NCC/ngày rồi mới lưu.
       setExcelItems(items);
+      setEditing(null);
       setDialogOpen(true);
     } catch {
       toast.error("Không thể đọc file Excel");
@@ -108,16 +126,19 @@ export default function ImportsPage() {
               <FileUp className="mr-2 h-4 w-4" />
               {importing ? "Đang đọc..." : "Nhập Excel"}
             </Button>
-            <Button
-              onClick={() => {
-                setExcelItems([]);
-                setDialogOpen(true);
-              }}
-              disabled={products.length === 0}
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Tạo phiếu nhập
-            </Button>
+            {canCreate ? (
+              <Button
+                onClick={() => {
+                  setEditing(null);
+                  setExcelItems([]);
+                  setDialogOpen(true);
+                }}
+                disabled={products.length === 0}
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Tạo phiếu nhập
+              </Button>
+            ) : null}
           </div>
         }
       />
@@ -165,6 +186,29 @@ export default function ImportsPage() {
                     {receipt.note ?? "-"}
                   </TableCell>
                   <TableCell className="text-right">
+                    {canEdit ? (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => {
+                          setEditing(receipt);
+                          setExcelItems([]);
+                          setDialogOpen(true);
+                        }}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                    ) : null}
+                    {canReturn ? (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        title="Trả hàng"
+                        onClick={() => setReturningReceipt(receipt)}
+                      >
+                        <Undo2 className="h-4 w-4" />
+                      </Button>
+                    ) : null}
                     <Button
                       size="icon"
                       variant="ghost"
@@ -197,26 +241,69 @@ export default function ImportsPage() {
         open={dialogOpen}
         onOpenChange={(open) => {
           setDialogOpen(open);
-          if (!open) setExcelItems([]);
+          if (!open) {
+            setExcelItems([]);
+            setEditing(null);
+          }
         }}
         type="import"
         products={products}
         partners={suppliers}
         initialItems={excelItems}
+        editingReceipt={editing}
         onSubmit={async (values) => {
           try {
-            await createImportReceipt({
-              receipt_number: values.receipt_number,
-              date: values.date,
-              supplier: values.supplier,
-              supplier_id: values.partner_id ?? null,
-              note: values.note,
-              items: values.items,
-            });
-            toast.success("Đã tạo phiếu nhập");
+            if (editing) {
+              await updateImportReceipt({
+                id: editing.id,
+                date: values.date,
+                supplier: values.supplier,
+                supplier_id: values.partner_id ?? null,
+                note: values.note,
+                items: values.items,
+              });
+              toast.success("Đã cập nhật phiếu nhập");
+            } else {
+              await createImportReceipt({
+                receipt_number: values.receipt_number,
+                date: values.date,
+                supplier: values.supplier,
+                supplier_id: values.partner_id ?? null,
+                note: values.note,
+                items: values.items,
+              });
+              toast.success("Đã tạo phiếu nhập");
+            }
           } catch (error) {
             toast.error(
-              error instanceof Error ? error.message : "Không thể tạo phiếu nhập",
+              error instanceof Error
+                ? error.message
+                : editing
+                  ? "Không thể cập nhật phiếu nhập"
+                  : "Không thể tạo phiếu nhập",
+            );
+            throw error;
+          }
+        }}
+      />
+
+      <ReturnFormDialog
+        key={returningReceipt ? returningReceipt.id : "closed"}
+        open={!!returningReceipt}
+        onOpenChange={(open) => {
+          if (!open) setReturningReceipt(null);
+        }}
+        returnType="supplier"
+        originalReceipt={returningReceipt}
+        returnReceipts={returnReceipts}
+        onSubmit={async (values) => {
+          try {
+            await createSupplierReturn(values);
+            await Promise.all([fetchDashboard(), fetchInventoryHistory(), fetchSuppliers()]);
+            toast.success("Đã tạo phiếu trả hàng");
+          } catch (error) {
+            toast.error(
+              error instanceof Error ? error.message : "Không thể tạo phiếu trả hàng",
             );
             throw error;
           }

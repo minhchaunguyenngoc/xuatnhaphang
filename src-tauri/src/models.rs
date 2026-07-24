@@ -125,6 +125,16 @@ pub struct CreateImportReceipt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateImportReceipt {
+    pub id: i64,
+    pub date: String,
+    pub supplier: Option<String>,
+    pub supplier_id: Option<i64>,
+    pub note: Option<String>,
+    pub items: Vec<ImportItemInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportItem {
     pub id: i64,
     pub receipt_id: i64,
@@ -241,4 +251,101 @@ pub struct InventoryHistory {
     pub reference_id: i64,
     pub receipt_number: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReturnItemInput {
+    pub original_item_id: i64,
+    pub product_id: i64,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCustomerReturn {
+    pub receipt_number: String,
+    pub original_receipt_id: i64,
+    pub date: String,
+    pub note: Option<String>,
+    pub items: Vec<ReturnItemInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSupplierReturn {
+    pub receipt_number: String,
+    pub original_receipt_id: i64,
+    pub date: String,
+    pub note: Option<String>,
+    pub items: Vec<ReturnItemInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReturnItem {
+    pub id: i64,
+    pub return_id: i64,
+    pub original_item_id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub product_code: String,
+    pub quantity: i64,
+    pub unit_price: f64,
+    pub cost_price: f64,
+    pub total_price: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReturnReceipt {
+    pub id: i64,
+    pub receipt_number: String,
+    pub return_type: String,
+    pub original_receipt_id: i64,
+    pub date: String,
+    pub note: Option<String>,
+    pub total_amount: f64,
+    pub created_at: String,
+    pub items: Vec<ReturnItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct User {
+    pub id: i64,
+    pub username: String,
+    pub full_name: String,
+    pub is_admin: bool,
+    pub is_active: bool,
+    pub permissions: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateUser {
+    pub username: String,
+    pub password: String,
+    pub full_name: String,
+    pub is_admin: bool,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateUser {
+    pub id: i64,
+    pub username: String,
+    /// Bỏ trống (`None`) nghĩa là giữ nguyên mật khẩu hiện tại.
+    pub password: Option<String>,
+    pub full_name: String,
+    pub is_admin: bool,
+    pub is_active: bool,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginInput {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Permission {
+    pub key: String,
+    pub label: String,
 }

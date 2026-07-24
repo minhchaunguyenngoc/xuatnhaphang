@@ -150,6 +150,53 @@ impl Database {
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
+
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS user_permissions (
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                permission_key TEXT NOT NULL,
+                PRIMARY KEY (user_id, permission_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id),
+                action TEXT NOT NULL,
+                detail TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS return_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                receipt_number TEXT NOT NULL UNIQUE,
+                return_type TEXT NOT NULL,
+                original_receipt_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                note TEXT,
+                total_amount REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS return_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                return_id INTEGER NOT NULL REFERENCES return_receipts(id) ON DELETE CASCADE,
+                original_item_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL REFERENCES products(id),
+                quantity INTEGER NOT NULL,
+                unit_price REAL NOT NULL,
+                cost_price REAL NOT NULL DEFAULT 0,
+                total_price REAL NOT NULL
+            );
             ",
         )?;
 
@@ -175,6 +222,13 @@ impl Database {
             "TEXT NOT NULL DEFAULT 'cash'",
         )?;
         Self::add_column_if_missing(&conn, "import_receipts", "supplier_id", "INTEGER")?;
+        // Cho phép sửa phiếu nhập (khi lô chưa bị xuất đụng tới) — cần dấu thời
+        // gian lần sửa cuối; phiếu cũ backfill = created_at.
+        Self::add_column_if_missing(&conn, "import_receipts", "updated_at", "TEXT")?;
+        conn.execute(
+            "UPDATE import_receipts SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''",
+            [],
+        )?;
         // FIFO phải theo NGÀY PHIẾU, không theo thời điểm insert (Issue 8). Thêm
         // cột ngày nhập trên batch; batch cũ backfill = ngày tạo.
         Self::add_column_if_missing(&conn, "product_batches", "import_date", "TEXT")?;
@@ -183,7 +237,30 @@ impl Database {
             [],
         )?;
         Self::backfill_batches_for_existing_stock(&conn)?;
+        Self::bootstrap_default_admin(&conn)?;
 
+        Ok(())
+    }
+
+    /// Nếu DB (mới hoặc vừa cập nhật từ bản chưa có đăng nhập) chưa có tài
+    /// khoản nào, tạo sẵn 1 admin mặc định để khách không bị khóa ngoài sau
+    /// khi cập nhật. Idempotent: chỉ chạy khi bảng `users` rỗng.
+    fn bootstrap_default_admin(conn: &Connection) -> SqlResult<()> {
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
+        if count > 0 {
+            return Ok(());
+        }
+        let password_hash = crate::auth::hash_password(crate::auth::DEFAULT_ADMIN_PASSWORD)
+            .map_err(|e| app_err(format!("Không thể khởi tạo tài khoản quản trị: {e}")))?;
+        conn.execute(
+            "INSERT INTO users (username, password_hash, full_name, is_admin, is_active)
+             VALUES (?1, ?2, ?3, 1, 1)",
+            params![
+                crate::auth::DEFAULT_ADMIN_USERNAME,
+                password_hash,
+                "Quản trị viên"
+            ],
+        )?;
         Ok(())
     }
 
@@ -335,26 +412,75 @@ impl Database {
         Ok(products)
     }
 
+    /// Tạo sản phẩm mới. Nếu bỏ trống `code`:
+    /// - Nếu đã có sản phẩm trùng CẢ tên lẫn giá nhập/giá xuất → coi là cùng
+    ///   1 sản phẩm, trả về sản phẩm đó thay vì tạo bản ghi trùng.
+    /// - Ngược lại tự sinh mã mới (SP0001, SP0002, ...).
+    /// Người dùng vẫn có thể tự gõ mã riêng — chỉ áp dụng logic này khi để trống.
     pub fn create_product(&self, input: CreateProduct) -> SqlResult<Product> {
-        let id = {
-            let conn = self.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO products (code, name, unit, import_price, export_price, min_stock, category, description)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    input.code,
-                    input.name,
-                    input.unit,
-                    input.import_price,
-                    input.export_price,
-                    input.min_stock,
-                    input.category,
-                    input.description
-                ],
-            )?;
-            conn.last_insert_rowid()
-        };
+        let conn = self.conn.lock().unwrap();
+
+        let code = input.code.trim();
+        if code.is_empty() {
+            let existing_result: SqlResult<i64> = conn.query_row(
+                "SELECT id FROM products WHERE name = ?1 AND import_price = ?2 AND export_price = ?3",
+                params![input.name, input.import_price, input.export_price],
+                |row| row.get(0),
+            );
+            let existing_id = match existing_result {
+                Ok(id) => Some(id),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(e),
+            };
+            if let Some(id) = existing_id {
+                drop(conn);
+                return self.get_product_by_id(id);
+            }
+
+            let generated_code = Self::generate_product_code(&conn)?;
+            let id = Self::insert_product(&conn, &generated_code, &input)?;
+            drop(conn);
+            return self.get_product_by_id(id);
+        }
+
+        let id = Self::insert_product(&conn, code, &input)?;
+        drop(conn);
         self.get_product_by_id(id)
+    }
+
+    fn insert_product(conn: &Connection, code: &str, input: &CreateProduct) -> SqlResult<i64> {
+        conn.execute(
+            "INSERT INTO products (code, name, unit, import_price, export_price, min_stock, category, description)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                code,
+                input.name,
+                input.unit,
+                input.import_price,
+                input.export_price,
+                input.min_stock,
+                input.category,
+                input.description
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Sinh mã tiếp theo dạng SP0001, SP0002, ... dựa trên số lớn nhất đang có
+    /// (không dùng COUNT vì mã có thể đã bị xóa/lệch thứ tự).
+    fn generate_product_code(conn: &Connection) -> SqlResult<String> {
+        let mut stmt = conn.prepare("SELECT code FROM products WHERE code LIKE 'SP%'")?;
+        let codes: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<SqlResult<Vec<_>>>()?;
+        let next = codes
+            .iter()
+            .filter_map(|c| c.strip_prefix("SP"))
+            .filter_map(|n| n.parse::<u32>().ok())
+            .max()
+            .map(|n| n + 1)
+            .unwrap_or(1);
+        Ok(format!("SP{next:04}"))
     }
 
     pub fn update_product(&self, input: UpdateProduct) -> SqlResult<Product> {
@@ -363,11 +489,12 @@ impl Database {
             // Khi còn tồn kho, `import_price` là giá vốn bình quân do hệ thống tự
             // duy trì (theo nhập + FIFO) — không cho sửa tay để tránh sai định giá
             // (Issue 15). Chỉ nhận `import_price` từ input khi tồn = 0.
-            let (stock, current_cost): (i64, f64) = conn.query_row(
-                "SELECT stock_quantity, import_price FROM products WHERE id = ?1",
-                params![input.id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            let (stock, current_cost, current_export_price): (i64, f64, f64) = conn
+                .query_row(
+                    "SELECT stock_quantity, import_price, export_price FROM products WHERE id = ?1",
+                    params![input.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
             let import_price = if stock > 0 {
                 current_cost
             } else {
@@ -388,6 +515,23 @@ impl Database {
                     input.id
                 ],
             )?;
+
+            // Ghi lại THỜI ĐIỂM đổi giá vào lịch sử (Kiểm kho) — quantity_change=0
+            // vì không ảnh hưởng tồn kho, chỉ đánh dấu mốc thời gian đổi giá.
+            if (current_export_price - input.export_price).abs() > f64::EPSILON {
+                conn.execute(
+                    "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
+                     VALUES (?1, 'export_price_change', 0, ?1)",
+                    params![input.id],
+                )?;
+            }
+            if stock == 0 && (current_cost - import_price).abs() > f64::EPSILON {
+                conn.execute(
+                    "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
+                     VALUES (?1, 'import_price_change', 0, ?1)",
+                    params![input.id],
+                )?;
+            }
         }
         self.get_product_by_id(input.id)
     }
@@ -823,6 +967,174 @@ impl Database {
         Ok(ImportReceipt { items, ..receipt })
     }
 
+    /// Sửa phiếu nhập — CHỈ cho phép khi mọi lô hàng (`product_batches`) của
+    /// phiếu này còn nguyên vẹn, tức chưa phiếu xuất nào tiêu thụ. Nếu đã bị
+    /// đụng tới thì từ chối để không phá vỡ giá vốn FIFO của các phiếu xuất
+    /// đã tạo dựa trên lô cũ. Cách làm: gỡ hiệu ứng của các dòng cũ (tồn kho,
+    /// lô, lịch sử, công nợ NCC) rồi áp dụng lại y hệt logic
+    /// `create_import_receipt` cho các dòng mới — giữ nguyên `receipt_number`.
+    pub fn update_import_receipt(&self, input: UpdateImportReceipt) -> SqlResult<ImportReceipt> {
+        if input.date.trim().is_empty() {
+            return Err(app_err("Ngày phiếu không được để trống."));
+        }
+        if input.items.is_empty() {
+            return Err(app_err("Phiếu phải có ít nhất 1 sản phẩm."));
+        }
+        for item in &input.items {
+            if item.product_id <= 0 {
+                return Err(app_err("Dòng nhập thiếu sản phẩm hợp lệ."));
+            }
+            if item.quantity < 1 {
+                return Err(app_err("Số lượng nhập phải >= 1."));
+            }
+            if item.unit_price < 0.0 {
+                return Err(app_err("Đơn giá nhập không được âm."));
+            }
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let touched: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM product_batches WHERE receipt_id = ?1 AND remaining_quantity < quantity",
+            params![input.id],
+            |row| row.get(0),
+        )?;
+        if touched > 0 {
+            return Err(app_err(
+                "Phiếu nhập đã có hàng được xuất, không thể sửa.",
+            ));
+        }
+
+        let (old_supplier_id, old_total): (Option<i64>, f64) = tx.query_row(
+            "SELECT supplier_id, total_amount FROM import_receipts WHERE id = ?1",
+            params![input.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let old_items: Vec<(i64, i64)> = {
+            let mut stmt =
+                tx.prepare("SELECT product_id, quantity FROM import_items WHERE receipt_id = ?1")?;
+            let rows = stmt
+                .query_map(params![input.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<SqlResult<Vec<_>>>()?;
+            rows
+        };
+        for (product_id, quantity) in &old_items {
+            tx.execute(
+                "UPDATE products SET stock_quantity = stock_quantity - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![quantity, product_id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM product_batches WHERE receipt_id = ?1",
+            params![input.id],
+        )?;
+        tx.execute(
+            "DELETE FROM import_items WHERE receipt_id = ?1",
+            params![input.id],
+        )?;
+        tx.execute(
+            "DELETE FROM inventory_history WHERE movement_type = 'import' AND reference_id = ?1",
+            params![input.id],
+        )?;
+        for (product_id, _) in &old_items {
+            Self::recompute_avg_cost(&tx, *product_id)?;
+        }
+
+        if let Some(old_sid) = old_supplier_id {
+            tx.execute(
+                "UPDATE suppliers SET total_purchased = total_purchased - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![old_total, old_sid],
+            )?;
+        }
+
+        let new_total: f64 = input
+            .items
+            .iter()
+            .map(|item| item.quantity as f64 * item.unit_price)
+            .sum();
+
+        for item in &input.items {
+            let total_price = item.quantity as f64 * item.unit_price;
+            tx.execute(
+                "INSERT INTO import_items (receipt_id, product_id, quantity, unit_price, total_price)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    input.id,
+                    item.product_id,
+                    item.quantity,
+                    item.unit_price,
+                    total_price
+                ],
+            )?;
+
+            let (current_stock, current_avg_cost): (i64, f64) = tx.query_row(
+                "SELECT stock_quantity, import_price FROM products WHERE id = ?1",
+                params![item.product_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let new_stock = current_stock + item.quantity;
+            let new_avg_cost = if new_stock > 0 {
+                (current_stock as f64 * current_avg_cost + item.quantity as f64 * item.unit_price)
+                    / new_stock as f64
+            } else {
+                item.unit_price
+            };
+
+            tx.execute(
+                "UPDATE products SET stock_quantity = ?1, import_price = ?2, updated_at = datetime('now', 'localtime') WHERE id = ?3",
+                params![new_stock, new_avg_cost, item.product_id],
+            )?;
+
+            tx.execute(
+                "INSERT INTO product_batches (product_id, receipt_id, quantity, remaining_quantity, cost_price, import_date)
+                 VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+                params![item.product_id, input.id, item.quantity, item.unit_price, input.date],
+            )?;
+
+            tx.execute(
+                "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
+                 VALUES (?1, 'import', ?2, ?3)",
+                params![item.product_id, item.quantity, input.id],
+            )?;
+
+            // Dòng 'import' ở trên phản ánh trạng thái MỚI sau khi sửa (đã xoá
+            // dòng cũ) nên tự nó không cho thấy phiếu từng bị sửa. Thêm 1 dòng
+            // đánh dấu riêng (quantity_change = 0, không ảnh hưởng tồn kho) để
+            // Kiểm kho hiển thị được lịch sử "đã sửa phiếu nhập".
+            tx.execute(
+                "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
+                 VALUES (?1, 'import_edit', 0, ?2)",
+                params![item.product_id, input.id],
+            )?;
+        }
+
+        if let Some(new_sid) = input.supplier_id {
+            tx.execute(
+                "UPDATE suppliers SET total_purchased = total_purchased + ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![new_total, new_sid],
+            )?;
+        }
+
+        tx.execute(
+            "UPDATE import_receipts SET date=?1, supplier=?2, supplier_id=?3, note=?4, total_amount=?5, updated_at=datetime('now', 'localtime')
+             WHERE id=?6",
+            params![
+                input.date,
+                input.supplier,
+                input.supplier_id,
+                input.note,
+                new_total,
+                input.id
+            ],
+        )?;
+
+        tx.commit()?;
+        drop(conn);
+        self.get_import_receipt(input.id)
+    }
+
     pub fn create_export_receipt(&self, input: CreateExportReceipt) -> SqlResult<ExportReceipt> {
         // Validation server-side (Issue 7).
         validate_receipt_header(&input.receipt_number, &input.date, input.items.len())?;
@@ -1070,6 +1382,636 @@ impl Database {
         Ok(ExportReceipt { items, ..receipt })
     }
 
+    /// Khách trả hàng đã mua — BẮT BUỘC gắn với dòng hàng cụ thể trên phiếu
+    /// bán gốc, không vượt quá số đã bán (trừ các lần trả trước). Nhập lại
+    /// kho đúng giá vốn đã ghi trên dòng xuất gốc (`export_items.cost_price`),
+    /// không dùng giá vốn hiện tại hay giá tự nhập — khớp sổ sách.
+    pub fn create_customer_return(&self, input: CreateCustomerReturn) -> SqlResult<ReturnReceipt> {
+        if input.date.trim().is_empty() {
+            return Err(app_err("Ngày trả không được để trống."));
+        }
+        if input.items.is_empty() {
+            return Err(app_err("Phiếu trả phải có ít nhất 1 sản phẩm."));
+        }
+        for item in &input.items {
+            if item.quantity < 1 {
+                return Err(app_err("Số lượng trả phải >= 1."));
+            }
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        struct Line {
+            original_item_id: i64,
+            product_id: i64,
+            quantity: i64,
+            unit_price: f64,
+            cost_price: f64,
+        }
+        let mut lines = Vec::with_capacity(input.items.len());
+        for item in &input.items {
+            let row: SqlResult<(i64, i64, f64, f64)> = tx.query_row(
+                "SELECT product_id, quantity, unit_price, cost_price FROM export_items WHERE id = ?1",
+                params![item.original_item_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            );
+            let (product_id, original_quantity, unit_price, cost_price) = match row {
+                Ok(v) => v,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(app_err("Không tìm thấy dòng hàng gốc trên phiếu bán."))
+                }
+                Err(e) => return Err(e),
+            };
+
+            let already_returned: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(ri.quantity), 0) FROM return_items ri
+                 JOIN return_receipts rr ON rr.id = ri.return_id
+                 WHERE rr.return_type = 'customer' AND ri.original_item_id = ?1",
+                params![item.original_item_id],
+                |row| row.get(0),
+            )?;
+            if item.quantity > original_quantity - already_returned {
+                return Err(app_err(
+                    "Số lượng trả vượt quá số lượng đã bán (sau khi trừ các lần trả trước).",
+                ));
+            }
+
+            lines.push(Line {
+                original_item_id: item.original_item_id,
+                product_id,
+                quantity: item.quantity,
+                unit_price,
+                cost_price,
+            });
+        }
+
+        let total_amount: f64 = lines.iter().map(|l| l.quantity as f64 * l.unit_price).sum();
+
+        tx.execute(
+            "INSERT INTO return_receipts (receipt_number, return_type, original_receipt_id, date, note, total_amount)
+             VALUES (?1, 'customer', ?2, ?3, ?4, ?5)",
+            params![
+                input.receipt_number,
+                input.original_receipt_id,
+                input.date,
+                input.note,
+                total_amount
+            ],
+        )?;
+        let return_id = tx.last_insert_rowid();
+
+        for line in &lines {
+            let total_price = line.quantity as f64 * line.unit_price;
+            tx.execute(
+                "INSERT INTO return_items (return_id, original_item_id, product_id, quantity, unit_price, cost_price, total_price)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    return_id,
+                    line.original_item_id,
+                    line.product_id,
+                    line.quantity,
+                    line.unit_price,
+                    line.cost_price,
+                    total_price
+                ],
+            )?;
+
+            // Lô mới nhập lại kho, đúng giá vốn đã bán ra (không phải giá vốn
+            // bình quân hiện tại) — `receipt_id` để NULL vì không gắn phiếu nhập nào.
+            tx.execute(
+                "INSERT INTO product_batches (product_id, quantity, remaining_quantity, cost_price, import_date)
+                 VALUES (?1, ?2, ?2, ?3, ?4)",
+                params![line.product_id, line.quantity, line.cost_price, input.date],
+            )?;
+            tx.execute(
+                "UPDATE products SET stock_quantity = stock_quantity + ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![line.quantity, line.product_id],
+            )?;
+            Self::recompute_avg_cost(&tx, line.product_id)?;
+            tx.execute(
+                "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
+                 VALUES (?1, 'customer_return', ?2, ?3)",
+                params![line.product_id, line.quantity, return_id],
+            )?;
+        }
+
+        // Trả hàng làm giảm cả công nợ lẫn doanh thu đã ghi nhận của khách,
+        // đối xứng với cách create_export_receipt cộng cả hai cùng lúc. Kẹp
+        // nợ về 0 — không theo dõi phần "khách được hoàn dư" (nhất quán với
+        // cách amount_paid dư không trừ nợ cũ ở phiếu bán).
+        let customer_id: Option<i64> = tx.query_row(
+            "SELECT customer_id FROM export_receipts WHERE id = ?1",
+            params![input.original_receipt_id],
+            |row| row.get(0),
+        )?;
+        if let Some(cid) = customer_id {
+            tx.execute(
+                "UPDATE customers SET debt = MAX(debt - ?1, 0), total_spent = total_spent - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![total_amount, cid],
+            )?;
+        }
+
+        tx.commit()?;
+        drop(conn);
+        self.get_return_receipt(return_id)
+    }
+
+    /// Trả hàng đã nhập cho nhà cung cấp — BẮT BUỘC gắn với dòng hàng cụ thể
+    /// trên phiếu nhập gốc. Khác với trả hàng khách: phải trừ đúng LÔ của
+    /// chính phiếu nhập đó (không phải FIFO chung), vì phải trả đúng lô đã
+    /// nhập — nếu lô đó đã bị bán bớt thì không đủ để trả.
+    pub fn create_supplier_return(&self, input: CreateSupplierReturn) -> SqlResult<ReturnReceipt> {
+        if input.date.trim().is_empty() {
+            return Err(app_err("Ngày trả không được để trống."));
+        }
+        if input.items.is_empty() {
+            return Err(app_err("Phiếu trả phải có ít nhất 1 sản phẩm."));
+        }
+        for item in &input.items {
+            if item.quantity < 1 {
+                return Err(app_err("Số lượng trả phải >= 1."));
+            }
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        struct Line {
+            original_item_id: i64,
+            product_id: i64,
+            quantity: i64,
+            unit_price: f64,
+        }
+        let mut lines = Vec::with_capacity(input.items.len());
+        for item in &input.items {
+            let row: SqlResult<(i64, i64, f64)> = tx.query_row(
+                "SELECT product_id, quantity, unit_price FROM import_items WHERE id = ?1",
+                params![item.original_item_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            );
+            let (product_id, original_quantity, unit_price) = match row {
+                Ok(v) => v,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(app_err("Không tìm thấy dòng hàng gốc trên phiếu nhập."))
+                }
+                Err(e) => return Err(e),
+            };
+
+            let already_returned: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(ri.quantity), 0) FROM return_items ri
+                 JOIN return_receipts rr ON rr.id = ri.return_id
+                 WHERE rr.return_type = 'supplier' AND ri.original_item_id = ?1",
+                params![item.original_item_id],
+                |row| row.get(0),
+            )?;
+            if item.quantity > original_quantity - already_returned {
+                return Err(app_err(
+                    "Số lượng trả vượt quá số lượng đã nhập (sau khi trừ các lần trả trước).",
+                ));
+            }
+
+            let batch_row: SqlResult<(i64, i64)> = tx.query_row(
+                "SELECT id, remaining_quantity FROM product_batches WHERE receipt_id = ?1 AND product_id = ?2",
+                params![input.original_receipt_id, product_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            );
+            let (batch_id, batch_remaining) = match batch_row {
+                Ok(v) => v,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(app_err("Không tìm thấy lô hàng của phiếu nhập này để trả."))
+                }
+                Err(e) => return Err(e),
+            };
+            if item.quantity > batch_remaining {
+                return Err(app_err(
+                    "Hàng đã được bán bớt, không đủ để trả cho nhà cung cấp.",
+                ));
+            }
+            tx.execute(
+                "UPDATE product_batches SET remaining_quantity = remaining_quantity - ?1 WHERE id = ?2",
+                params![item.quantity, batch_id],
+            )?;
+
+            lines.push(Line {
+                original_item_id: item.original_item_id,
+                product_id,
+                quantity: item.quantity,
+                unit_price,
+            });
+        }
+
+        let total_amount: f64 = lines.iter().map(|l| l.quantity as f64 * l.unit_price).sum();
+
+        tx.execute(
+            "INSERT INTO return_receipts (receipt_number, return_type, original_receipt_id, date, note, total_amount)
+             VALUES (?1, 'supplier', ?2, ?3, ?4, ?5)",
+            params![
+                input.receipt_number,
+                input.original_receipt_id,
+                input.date,
+                input.note,
+                total_amount
+            ],
+        )?;
+        let return_id = tx.last_insert_rowid();
+
+        for line in &lines {
+            let total_price = line.quantity as f64 * line.unit_price;
+            tx.execute(
+                "INSERT INTO return_items (return_id, original_item_id, product_id, quantity, unit_price, cost_price, total_price)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                params![
+                    return_id,
+                    line.original_item_id,
+                    line.product_id,
+                    line.quantity,
+                    line.unit_price,
+                    total_price
+                ],
+            )?;
+
+            tx.execute(
+                "UPDATE products SET stock_quantity = stock_quantity - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![line.quantity, line.product_id],
+            )?;
+            Self::recompute_avg_cost(&tx, line.product_id)?;
+            tx.execute(
+                "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
+                 VALUES (?1, 'supplier_return', ?2, ?3)",
+                params![line.product_id, -line.quantity, return_id],
+            )?;
+        }
+
+        // `suppliers.debt` không được ghi ở bất kỳ đâu khác trong hệ thống
+        // (luôn = 0, chưa có cơ chế mua chịu NCC) nên không đụng vào — chỉ
+        // điều chỉnh total_purchased cho đúng thực tế đã mua.
+        let supplier_id: Option<i64> = tx.query_row(
+            "SELECT supplier_id FROM import_receipts WHERE id = ?1",
+            params![input.original_receipt_id],
+            |row| row.get(0),
+        )?;
+        if let Some(sid) = supplier_id {
+            tx.execute(
+                "UPDATE suppliers SET total_purchased = total_purchased - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![total_amount, sid],
+            )?;
+        }
+
+        tx.commit()?;
+        drop(conn);
+        self.get_return_receipt(return_id)
+    }
+
+    pub fn get_return_receipts(&self) -> SqlResult<Vec<ReturnReceipt>> {
+        let conn = self.conn.lock().unwrap();
+        let mut receipts: Vec<ReturnReceipt> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, receipt_number, return_type, original_receipt_id, date, note, total_amount, created_at
+                 FROM return_receipts ORDER BY date DESC, id DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ReturnReceipt {
+                        id: row.get(0)?,
+                        receipt_number: row.get(1)?,
+                        return_type: row.get(2)?,
+                        original_receipt_id: row.get(3)?,
+                        date: row.get(4)?,
+                        note: row.get(5)?,
+                        total_amount: row.get(6)?,
+                        created_at: row.get(7)?,
+                        items: vec![],
+                    })
+                })?
+                .collect::<SqlResult<Vec<_>>>()?;
+            rows
+        };
+
+        let mut items_by_return: HashMap<i64, Vec<ReturnItem>> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT ri.id, ri.return_id, ri.original_item_id, ri.product_id, p.name, p.code, ri.quantity, ri.unit_price, ri.cost_price, ri.total_price
+                 FROM return_items ri
+                 JOIN products p ON p.id = ri.product_id
+                 ORDER BY ri.id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ReturnItem {
+                    id: row.get(0)?,
+                    return_id: row.get(1)?,
+                    original_item_id: row.get(2)?,
+                    product_id: row.get(3)?,
+                    product_name: row.get(4)?,
+                    product_code: row.get(5)?,
+                    quantity: row.get(6)?,
+                    unit_price: row.get(7)?,
+                    cost_price: row.get(8)?,
+                    total_price: row.get(9)?,
+                })
+            })?;
+            for item in rows {
+                let item = item?;
+                items_by_return.entry(item.return_id).or_default().push(item);
+            }
+        }
+
+        for receipt in &mut receipts {
+            if let Some(items) = items_by_return.remove(&receipt.id) {
+                receipt.items = items;
+            }
+        }
+        Ok(receipts)
+    }
+
+    fn get_return_receipt(&self, id: i64) -> SqlResult<ReturnReceipt> {
+        let conn = self.conn.lock().unwrap();
+        let receipt = conn.query_row(
+            "SELECT id, receipt_number, return_type, original_receipt_id, date, note, total_amount, created_at
+             FROM return_receipts WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ReturnReceipt {
+                    id: row.get(0)?,
+                    receipt_number: row.get(1)?,
+                    return_type: row.get(2)?,
+                    original_receipt_id: row.get(3)?,
+                    date: row.get(4)?,
+                    note: row.get(5)?,
+                    total_amount: row.get(6)?,
+                    created_at: row.get(7)?,
+                    items: vec![],
+                })
+            },
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT ri.id, ri.return_id, ri.original_item_id, ri.product_id, p.name, p.code, ri.quantity, ri.unit_price, ri.cost_price, ri.total_price
+             FROM return_items ri
+             JOIN products p ON p.id = ri.product_id
+             WHERE ri.return_id = ?1",
+        )?;
+        let items = stmt
+            .query_map(params![id], |row| {
+                Ok(ReturnItem {
+                    id: row.get(0)?,
+                    return_id: row.get(1)?,
+                    original_item_id: row.get(2)?,
+                    product_id: row.get(3)?,
+                    product_name: row.get(4)?,
+                    product_code: row.get(5)?,
+                    quantity: row.get(6)?,
+                    unit_price: row.get(7)?,
+                    cost_price: row.get(8)?,
+                    total_price: row.get(9)?,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+
+        Ok(ReturnReceipt { items, ..receipt })
+    }
+
+    fn map_user_row(
+        row: &rusqlite::Row,
+    ) -> SqlResult<(i64, String, String, String, bool, bool, String, String)> {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+        ))
+    }
+
+    fn load_permissions(conn: &Connection, user_id: i64, is_admin: bool) -> SqlResult<Vec<String>> {
+        if is_admin {
+            return Ok(crate::auth::PERMISSION_KEYS
+                .iter()
+                .map(|(key, _)| key.to_string())
+                .collect());
+        }
+        let mut stmt =
+            conn.prepare("SELECT permission_key FROM user_permissions WHERE user_id = ?1")?;
+        let rows = stmt
+            .query_map(params![user_id], |row| row.get::<_, String>(0))?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn login(&self, input: LoginInput) -> SqlResult<User> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, username, password_hash, full_name, is_admin, is_active, created_at, updated_at
+             FROM users WHERE username = ?1",
+            params![input.username],
+            Self::map_user_row,
+        );
+        let (id, username, password_hash, full_name, is_admin, is_active, created_at, updated_at) =
+            match result {
+                Ok(v) => v,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(app_err("Sai tên đăng nhập hoặc mật khẩu."))
+                }
+                Err(e) => return Err(e),
+            };
+
+        if !is_active {
+            return Err(app_err("Tài khoản đã bị khóa."));
+        }
+        if !crate::auth::verify_password(&input.password, &password_hash) {
+            return Err(app_err("Sai tên đăng nhập hoặc mật khẩu."));
+        }
+
+        let permissions = Self::load_permissions(&conn, id, is_admin)?;
+        Ok(User {
+            id,
+            username,
+            full_name,
+            is_admin,
+            is_active,
+            permissions,
+            created_at,
+            updated_at,
+        })
+    }
+
+    pub fn get_users(&self) -> SqlResult<Vec<User>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, username, password_hash, full_name, is_admin, is_active, created_at, updated_at
+             FROM users ORDER BY username ASC",
+        )?;
+        let rows = stmt
+            .query_map([], Self::map_user_row)?
+            .collect::<SqlResult<Vec<_>>>()?;
+        let mut users = Vec::with_capacity(rows.len());
+        for (id, username, _hash, full_name, is_admin, is_active, created_at, updated_at) in rows {
+            let permissions = Self::load_permissions(&conn, id, is_admin)?;
+            users.push(User {
+                id,
+                username,
+                full_name,
+                is_admin,
+                is_active,
+                permissions,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(users)
+    }
+
+    fn get_user_by_id(&self, id: i64) -> SqlResult<User> {
+        let conn = self.conn.lock().unwrap();
+        let (id, username, _hash, full_name, is_admin, is_active, created_at, updated_at) = conn
+            .query_row(
+                "SELECT id, username, password_hash, full_name, is_admin, is_active, created_at, updated_at
+                 FROM users WHERE id = ?1",
+                params![id],
+                Self::map_user_row,
+            )?;
+        let permissions = Self::load_permissions(&conn, id, is_admin)?;
+        Ok(User {
+            id,
+            username,
+            full_name,
+            is_admin,
+            is_active,
+            permissions,
+            created_at,
+            updated_at,
+        })
+    }
+
+    pub fn create_user(&self, input: CreateUser) -> SqlResult<User> {
+        if input.username.trim().is_empty() {
+            return Err(app_err("Tên đăng nhập không được để trống."));
+        }
+        if input.password.len() < 4 {
+            return Err(app_err("Mật khẩu phải có ít nhất 4 ký tự."));
+        }
+        let password_hash = crate::auth::hash_password(&input.password)
+            .map_err(|e| app_err(format!("Không thể tạo mật khẩu: {e}")))?;
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO users (username, password_hash, full_name, is_admin, is_active) VALUES (?1, ?2, ?3, ?4, 1)",
+            params![input.username, password_hash, input.full_name, input.is_admin],
+        )?;
+        let id = tx.last_insert_rowid();
+        if !input.is_admin {
+            for key in &input.permissions {
+                tx.execute(
+                    "INSERT INTO user_permissions (user_id, permission_key) VALUES (?1, ?2)",
+                    params![id, key],
+                )?;
+            }
+        }
+        tx.commit()?;
+        drop(conn);
+        self.get_user_by_id(id)
+    }
+
+    pub fn update_user(&self, input: UpdateUser) -> SqlResult<User> {
+        if input.username.trim().is_empty() {
+            return Err(app_err("Tên đăng nhập không được để trống."));
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        if !input.is_admin {
+            let was_admin: bool = tx.query_row(
+                "SELECT is_admin FROM users WHERE id = ?1",
+                params![input.id],
+                |row| row.get(0),
+            )?;
+            let other_admins: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND id != ?1",
+                params![input.id],
+                |row| row.get(0),
+            )?;
+            if was_admin && other_admins == 0 {
+                return Err(app_err(
+                    "Không thể bỏ quyền admin của tài khoản admin cuối cùng.",
+                ));
+            }
+        }
+
+        match &input.password {
+            Some(new_password) => {
+                let password_hash = crate::auth::hash_password(new_password)
+                    .map_err(|e| app_err(format!("Không thể tạo mật khẩu: {e}")))?;
+                tx.execute(
+                    "UPDATE users SET username=?1, password_hash=?2, full_name=?3, is_admin=?4, is_active=?5, updated_at=datetime('now', 'localtime')
+                     WHERE id=?6",
+                    params![
+                        input.username,
+                        password_hash,
+                        input.full_name,
+                        input.is_admin,
+                        input.is_active,
+                        input.id
+                    ],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "UPDATE users SET username=?1, full_name=?2, is_admin=?3, is_active=?4, updated_at=datetime('now', 'localtime')
+                     WHERE id=?5",
+                    params![
+                        input.username,
+                        input.full_name,
+                        input.is_admin,
+                        input.is_active,
+                        input.id
+                    ],
+                )?;
+            }
+        }
+
+        tx.execute(
+            "DELETE FROM user_permissions WHERE user_id = ?1",
+            params![input.id],
+        )?;
+        if !input.is_admin {
+            for key in &input.permissions {
+                tx.execute(
+                    "INSERT INTO user_permissions (user_id, permission_key) VALUES (?1, ?2)",
+                    params![input.id, key],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        drop(conn);
+        self.get_user_by_id(input.id)
+    }
+
+    pub fn delete_user(&self, id: i64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let is_admin: bool = conn.query_row(
+            "SELECT is_admin FROM users WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if is_admin {
+            let other_admins: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND id != ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            if other_admins == 0 {
+                return Err(app_err("Không thể xóa admin cuối cùng."));
+            }
+        }
+        conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn get_dashboard_stats(&self) -> SqlResult<DashboardStats> {
         let conn = self.conn.lock().unwrap();
         let total_products: i64 =
@@ -1189,12 +2131,13 @@ impl Database {
             "SELECT ih.id, ih.product_id, p.name, ih.movement_type, ih.quantity_change, ih.reference_id,
                     CASE ih.movement_type
                         WHEN 'import' THEN ir.receipt_number
+                        WHEN 'import_edit' THEN ir.receipt_number
                         WHEN 'export' THEN er.receipt_number
                     END AS receipt_number,
                     ih.created_at
              FROM inventory_history ih
              JOIN products p ON p.id = ih.product_id
-             LEFT JOIN import_receipts ir ON ih.movement_type = 'import' AND ir.id = ih.reference_id
+             LEFT JOIN import_receipts ir ON ih.movement_type IN ('import', 'import_edit') AND ir.id = ih.reference_id
              LEFT JOIN export_receipts er ON ih.movement_type = 'export' AND er.id = ih.reference_id
              ORDER BY ih.created_at DESC, ih.id DESC
              LIMIT 200",
@@ -1507,5 +2450,294 @@ mod tests {
             "profit {}",
             rep.total_profit
         );
+    }
+
+    #[test]
+    fn update_import_receipt_allowed_when_untouched() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let receipt_id = db.get_import_receipts().unwrap()[0].id;
+
+        let updated = db
+            .update_import_receipt(UpdateImportReceipt {
+                id: receipt_id,
+                date: "2026-01-01".into(),
+                supplier: None,
+                supplier_id: None,
+                note: None,
+                items: vec![ImportItemInput {
+                    product_id: p,
+                    quantity: 20,
+                    unit_price: 10.0,
+                }],
+            })
+            .unwrap();
+        assert_eq!(updated.items[0].quantity, 20);
+        assert_eq!(stock(&db, p), 20);
+    }
+
+    #[test]
+    fn update_import_receipt_rejected_when_batch_consumed() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let receipt_id = db.get_import_receipts().unwrap()[0].id;
+        export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 50.0,
+            }],
+        )
+        .unwrap();
+
+        let res = db.update_import_receipt(UpdateImportReceipt {
+            id: receipt_id,
+            date: "2026-01-01".into(),
+            supplier: None,
+            supplier_id: None,
+            note: None,
+            items: vec![ImportItemInput {
+                product_id: p,
+                quantity: 20,
+                unit_price: 10.0,
+            }],
+        });
+        assert!(res.is_err(), "phải từ chối sửa khi lô đã bị xuất đụng tới");
+        assert_eq!(stock(&db, p), 5, "tồn không đổi khi sửa bị từ chối");
+    }
+
+    #[test]
+    fn customer_return_restocks_at_original_cost_and_reduces_debt() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        assert_eq!(stock(&db, p), 5);
+        assert!((db.get_customer_by_id(c).unwrap().debt - 500.0).abs() < 1e-9);
+
+        let export_item_id = sale.items[0].id;
+        let ret = db
+            .create_customer_return(CreateCustomerReturn {
+                receipt_number: "PT1".into(),
+                original_receipt_id: sale.id,
+                date: "2026-01-03".into(),
+                note: None,
+                items: vec![ReturnItemInput {
+                    original_item_id: export_item_id,
+                    product_id: p,
+                    quantity: 2,
+                }],
+            })
+            .unwrap();
+        assert!(
+            (ret.items[0].cost_price - 10.0).abs() < 1e-9,
+            "phải nhập lại đúng giá vốn đã bán, không phải giá vốn hiện tại"
+        );
+        assert_eq!(stock(&db, p), 7, "tồn tăng lại đúng số lượng trả");
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 300.0).abs() < 1e-9,
+            "nợ phải giảm đúng giá trị hàng trả (2 x 100)"
+        );
+
+        // Đã trả 2/5, thử trả thêm 4 (vượt quá 3 còn lại) phải bị từ chối.
+        let over = db.create_customer_return(CreateCustomerReturn {
+            receipt_number: "PT2".into(),
+            original_receipt_id: sale.id,
+            date: "2026-01-04".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: export_item_id,
+                product_id: p,
+                quantity: 4,
+            }],
+        });
+        assert!(over.is_err(), "không được trả vượt quá số lượng còn lại");
+    }
+
+    #[test]
+    fn supplier_return_rejects_when_batch_already_sold() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let receipts = db.get_import_receipts().unwrap();
+        let receipt_id = receipts[0].id;
+        let import_item_id = receipts[0].items[0].id;
+        export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 10,
+                unit_price: 50.0,
+            }],
+        )
+        .unwrap();
+
+        let res = db.create_supplier_return(CreateSupplierReturn {
+            receipt_number: "PTN1".into(),
+            original_receipt_id: receipt_id,
+            date: "2026-01-03".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: import_item_id,
+                product_id: p,
+                quantity: 1,
+            }],
+        });
+        assert!(res.is_err(), "không được trả NCC khi hàng đã bán hết");
+    }
+
+    #[test]
+    fn supplier_return_reduces_stock_when_batch_available() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let receipts = db.get_import_receipts().unwrap();
+        let receipt_id = receipts[0].id;
+        let import_item_id = receipts[0].items[0].id;
+
+        db.create_supplier_return(CreateSupplierReturn {
+            receipt_number: "PTN1".into(),
+            original_receipt_id: receipt_id,
+            date: "2026-01-02".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: import_item_id,
+                product_id: p,
+                quantity: 3,
+            }],
+        })
+        .unwrap();
+        assert_eq!(stock(&db, p), 7);
+    }
+
+    fn new_product_input(name: &str, import_price: f64, export_price: f64) -> CreateProduct {
+        CreateProduct {
+            code: String::new(),
+            name: name.to_string(),
+            unit: "cái".to_string(),
+            import_price,
+            export_price,
+            min_stock: 0,
+            category: None,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn create_product_auto_generates_code_when_blank() {
+        let db = Database::new_memory();
+        let p = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
+        assert!(p.code.starts_with("SP"), "mã phải tự sinh, thực tế {}", p.code);
+    }
+
+    #[test]
+    fn create_product_reuses_existing_when_name_and_prices_match() {
+        let db = Database::new_memory();
+        let first = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
+        let second = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
+        assert_eq!(
+            first.id, second.id,
+            "trùng tên + cả 2 giá phải dùng lại đúng sản phẩm cũ"
+        );
+    }
+
+    #[test]
+    fn create_product_creates_new_when_price_differs() {
+        let db = Database::new_memory();
+        let first = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
+        let second = db.create_product(new_product_input("Áo thun", 50.0, 90.0)).unwrap();
+        assert_ne!(
+            first.id, second.id,
+            "khác giá xuất phải tạo sản phẩm mới, không dùng chung mã"
+        );
+        assert_ne!(first.code, second.code);
+    }
+
+    #[test]
+    fn update_product_logs_export_price_change_to_history() {
+        let db = Database::new_memory();
+        let p = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
+
+        db.update_product(UpdateProduct {
+            id: p.id,
+            code: p.code.clone(),
+            name: p.name.clone(),
+            unit: p.unit.clone(),
+            import_price: p.import_price,
+            export_price: 95.0,
+            min_stock: p.min_stock,
+            category: None,
+            description: None,
+        })
+        .unwrap();
+
+        let history = db.get_inventory_history().unwrap();
+        assert!(
+            history
+                .iter()
+                .any(|h| h.movement_type == "export_price_change" && h.product_id == p.id),
+            "phải ghi lại mốc thời gian đổi giá bán vào lịch sử kiểm kho"
+        );
+
+        // Sửa lại thông tin khác nhưng KHÔNG đổi giá bán → không ghi thêm marker.
+        let before = history
+            .iter()
+            .filter(|h| h.movement_type == "export_price_change")
+            .count();
+        db.update_product(UpdateProduct {
+            id: p.id,
+            code: p.code.clone(),
+            name: "Áo thun cổ tròn".into(),
+            unit: p.unit.clone(),
+            import_price: p.import_price,
+            export_price: 95.0,
+            min_stock: p.min_stock,
+            category: None,
+            description: None,
+        })
+        .unwrap();
+        let after = db
+            .get_inventory_history()
+            .unwrap()
+            .iter()
+            .filter(|h| h.movement_type == "export_price_change")
+            .count();
+        assert_eq!(before, after, "không đổi giá thì không ghi thêm marker");
     }
 }

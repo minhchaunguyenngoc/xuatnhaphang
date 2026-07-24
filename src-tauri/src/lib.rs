@@ -1,3 +1,4 @@
+mod auth;
 mod commands;
 mod db;
 mod models;
@@ -37,8 +38,18 @@ pub fn run() {
             commands::delete_supplier,
             commands::get_import_receipts,
             commands::create_import_receipt,
+            commands::update_import_receipt,
             commands::get_export_receipts,
             commands::create_export_receipt,
+            commands::get_return_receipts,
+            commands::create_customer_return,
+            commands::create_supplier_return,
+            commands::get_permissions,
+            commands::login,
+            commands::get_users,
+            commands::create_user,
+            commands::update_user,
+            commands::delete_user,
             commands::get_dashboard_stats,
             commands::get_inventory_history,
             commands::get_profit_report,

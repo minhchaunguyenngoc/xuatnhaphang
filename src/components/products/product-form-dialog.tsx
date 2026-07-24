@@ -94,7 +94,11 @@ export function ProductFormDialog({
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="code">Mã sản phẩm</Label>
-              <Input id="code" {...register("code")} />
+              <Input
+                id="code"
+                placeholder={product ? undefined : "Để trống sẽ tự sinh mã"}
+                {...register("code")}
+              />
               {errors.code ? (
                 <p className="text-xs text-destructive">{errors.code.message}</p>
               ) : null}

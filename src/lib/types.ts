@@ -14,7 +14,9 @@ export interface Product {
 }
 
 export interface CreateProduct {
-  code: string;
+  /** Để trống → backend tự sinh mã, hoặc dùng lại mã sản phẩm trùng tên +
+   * giá nhập + giá xuất nếu đã có. */
+  code?: string;
   name: string;
   unit: string;
   import_price: number;
@@ -26,6 +28,8 @@ export interface CreateProduct {
 
 export interface UpdateProduct extends CreateProduct {
   id: number;
+  /** Sửa sản phẩm đã có luôn có mã sẵn — không áp dụng tự sinh mã. */
+  code: string;
 }
 
 export interface Customer {
@@ -116,6 +120,17 @@ export interface ImportReceipt {
   items: ImportItem[];
 }
 
+/** Sửa phiếu nhập — chỉ cho phép khi lô hàng của phiếu chưa bị phiếu xuất
+ * nào tiêu thụ (an toàn cho giá vốn FIFO). `receipt_number` không đổi được. */
+export interface UpdateImportReceipt {
+  id: number;
+  date: string;
+  supplier?: string | null;
+  supplier_id?: number | null;
+  note?: string | null;
+  items: ImportItemInput[];
+}
+
 export interface ExportItemInput {
   product_id: number;
   quantity: number;
@@ -202,4 +217,93 @@ export interface ProfitReport {
   total_profit: number;
   margin_percent: number;
   by_product: ProductProfitRow[];
+}
+
+export type ReturnType = "customer" | "supplier";
+
+export interface ReturnItemInput {
+  original_item_id: number;
+  product_id: number;
+  quantity: number;
+}
+
+export interface CreateCustomerReturn {
+  receipt_number: string;
+  original_receipt_id: number;
+  date: string;
+  note?: string | null;
+  items: ReturnItemInput[];
+}
+
+export interface CreateSupplierReturn {
+  receipt_number: string;
+  original_receipt_id: number;
+  date: string;
+  note?: string | null;
+  items: ReturnItemInput[];
+}
+
+export interface ReturnItem {
+  id: number;
+  return_id: number;
+  original_item_id: number;
+  product_id: number;
+  product_name: string;
+  product_code: string;
+  quantity: number;
+  unit_price: number;
+  cost_price: number;
+  total_price: number;
+}
+
+export interface ReturnReceipt {
+  id: number;
+  receipt_number: string;
+  return_type: ReturnType;
+  original_receipt_id: number;
+  date: string;
+  note: string | null;
+  total_amount: number;
+  created_at: string;
+  items: ReturnItem[];
+}
+
+export interface Permission {
+  key: string;
+  label: string;
+}
+
+export interface User {
+  id: number;
+  username: string;
+  full_name: string;
+  is_admin: boolean;
+  is_active: boolean;
+  permissions: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateUser {
+  username: string;
+  password: string;
+  full_name: string;
+  is_admin: boolean;
+  permissions: string[];
+}
+
+export interface UpdateUser {
+  id: number;
+  username: string;
+  /** Bỏ trống (không set) nghĩa là giữ nguyên mật khẩu hiện tại. */
+  password?: string | null;
+  full_name: string;
+  is_admin: boolean;
+  is_active: boolean;
+  permissions: string[];
+}
+
+export interface LoginInput {
+  username: string;
+  password: string;
 }

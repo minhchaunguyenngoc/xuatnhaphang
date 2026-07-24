@@ -96,6 +96,14 @@ pub fn create_import_receipt(
 }
 
 #[tauri::command]
+pub fn update_import_receipt(
+    db: State<'_, Database>,
+    input: UpdateImportReceipt,
+) -> Result<ImportReceipt, String> {
+    db.update_import_receipt(input).map_err(map_err_vi)
+}
+
+#[tauri::command]
 pub fn get_export_receipts(db: State<'_, Database>) -> Result<Vec<ExportReceipt>, String> {
     db.get_export_receipts().map_err(map_err_vi)
 }
@@ -106,6 +114,63 @@ pub fn create_export_receipt(
     input: CreateExportReceipt,
 ) -> Result<ExportReceipt, String> {
     db.create_export_receipt(input).map_err(map_err_vi)
+}
+
+#[tauri::command]
+pub fn get_return_receipts(db: State<'_, Database>) -> Result<Vec<ReturnReceipt>, String> {
+    db.get_return_receipts().map_err(map_err_vi)
+}
+
+#[tauri::command]
+pub fn create_customer_return(
+    db: State<'_, Database>,
+    input: CreateCustomerReturn,
+) -> Result<ReturnReceipt, String> {
+    db.create_customer_return(input).map_err(map_err_vi)
+}
+
+#[tauri::command]
+pub fn create_supplier_return(
+    db: State<'_, Database>,
+    input: CreateSupplierReturn,
+) -> Result<ReturnReceipt, String> {
+    db.create_supplier_return(input).map_err(map_err_vi)
+}
+
+#[tauri::command]
+pub fn get_permissions() -> Vec<Permission> {
+    crate::auth::PERMISSION_KEYS
+        .iter()
+        .map(|(key, label)| Permission {
+            key: key.to_string(),
+            label: label.to_string(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn login(db: State<'_, Database>, input: LoginInput) -> Result<User, String> {
+    db.login(input).map_err(map_err_vi)
+}
+
+#[tauri::command]
+pub fn get_users(db: State<'_, Database>) -> Result<Vec<User>, String> {
+    db.get_users().map_err(map_err_vi)
+}
+
+#[tauri::command]
+pub fn create_user(db: State<'_, Database>, input: CreateUser) -> Result<User, String> {
+    db.create_user(input).map_err(map_err_vi)
+}
+
+#[tauri::command]
+pub fn update_user(db: State<'_, Database>, input: UpdateUser) -> Result<User, String> {
+    db.update_user(input).map_err(map_err_vi)
+}
+
+#[tauri::command]
+pub fn delete_user(db: State<'_, Database>, id: i64) -> Result<(), String> {
+    db.delete_user(id).map_err(map_err_vi)
 }
 
 #[tauri::command]

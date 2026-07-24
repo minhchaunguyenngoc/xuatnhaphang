@@ -16,12 +16,43 @@ import {
 import { formatCurrency, formatDateTime, formatNumber } from "@/lib/format";
 import { useInventoryStore } from "@/stores/inventory-store";
 
-type MovementFilter = "all" | "export" | "import";
+type MovementFilter =
+  | "all"
+  | "export"
+  | "import"
+  | "import_edit"
+  | "export_price_change"
+  | "import_price_change"
+  | "customer_return"
+  | "supplier_return";
+
+const MOVEMENT_LABELS: Record<string, string> = {
+  export: "Xuất",
+  import: "Nhập",
+  import_edit: "Sửa phiếu nhập",
+  export_price_change: "Đổi giá bán",
+  import_price_change: "Đổi giá nhập",
+  customer_return: "Khách trả hàng",
+  supplier_return: "Trả NCC",
+};
+
+/** Các loại chỉ đánh dấu MỐC THỜI GIAN (quantity_change luôn = 0, không ảnh
+ * hưởng tồn kho) — hiển thị trung tính thay vì +/- số lượng. */
+const MARKER_TYPES = new Set([
+  "import_edit",
+  "export_price_change",
+  "import_price_change",
+]);
+
+/** Loại nào làm GIẢM tồn kho → hiển thị màu đỏ, ngược lại màu xanh. */
+function isNegativeMovement(movementType: string): boolean {
+  return movementType === "export" || movementType === "supplier_return";
+}
 
 export default function InventoryPage() {
   const { products, inventoryHistory, fetchProducts, fetchInventoryHistory } =
     useInventoryStore();
-  const [filter, setFilter] = useState<MovementFilter>("export");
+  const [filter, setFilter] = useState<MovementFilter>("all");
 
   useEffect(() => {
     void fetchProducts();
@@ -112,9 +143,14 @@ export default function InventoryPage() {
           <div className="flex gap-1">
             {(
               [
-                ["export", "Xuất hàng"],
-                ["import", "Nhập hàng"],
                 ["all", "Tất cả"],
+                ["import", "Nhập hàng"],
+                ["import_edit", "Sửa phiếu nhập"],
+                ["export", "Xuất hàng"],
+                ["export_price_change", "Đổi giá bán"],
+                ["import_price_change", "Đổi giá nhập"],
+                ["customer_return", "Khách trả hàng"],
+                ["supplier_return", "Trả NCC"],
               ] as const
             ).map(([value, label]) => (
               <Button
@@ -148,28 +184,34 @@ export default function InventoryPage() {
                 </TableRow>
               ) : (
                 filteredHistory.map((h) => {
-                  const isExport = h.movement_type === "export";
+                  const isNegative = isNegativeMovement(h.movement_type);
+                  const isMarker = MARKER_TYPES.has(h.movement_type);
                   return (
                     <TableRow key={h.id}>
                       <TableCell className="whitespace-nowrap font-medium">
                         {formatDateTime(h.created_at)}
                       </TableCell>
                       <TableCell>
-                        <Badge variant={isExport ? "destructive" : "secondary"}>
-                          {isExport ? "Xuất" : "Nhập"}
+                        <Badge variant={isMarker ? "outline" : isNegative ? "destructive" : "secondary"}>
+                          {MOVEMENT_LABELS[h.movement_type] ?? h.movement_type}
                         </Badge>
                       </TableCell>
                       <TableCell>{h.product_name}</TableCell>
                       <TableCell
                         className={`text-right font-medium ${
-                          isExport ? "text-destructive" : "text-emerald-600"
+                          isMarker
+                            ? "text-muted-foreground"
+                            : isNegative
+                              ? "text-destructive"
+                              : "text-emerald-600"
                         }`}
                       >
-                        {h.quantity_change > 0 ? "+" : ""}
-                        {formatNumber(h.quantity_change)}
+                        {isMarker
+                          ? "—"
+                          : `${h.quantity_change > 0 ? "+" : ""}${formatNumber(h.quantity_change)}`}
                       </TableCell>
                       <TableCell>
-                        {h.receipt_number ?? `#${h.reference_id}`}
+                        {h.receipt_number ?? (isMarker ? "-" : `#${h.reference_id}`)}
                       </TableCell>
                     </TableRow>
                   );

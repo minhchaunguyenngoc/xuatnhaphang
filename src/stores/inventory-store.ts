@@ -16,6 +16,7 @@ import type {
   ProfitReport,
   Supplier,
   UpdateCustomer,
+  UpdateImportReceipt,
   UpdateProduct,
   UpdateSupplier,
 } from "@/lib/types";
@@ -32,7 +33,7 @@ interface InventoryState {
   loading: boolean;
   error: string | null;
   fetchProducts: () => Promise<void>;
-  createProduct: (input: CreateProduct) => Promise<void>;
+  createProduct: (input: CreateProduct) => Promise<Product>;
   updateProduct: (input: UpdateProduct) => Promise<void>;
   deleteProduct: (id: number) => Promise<void>;
   importProducts: (
@@ -48,6 +49,7 @@ interface InventoryState {
   deleteSupplier: (id: number) => Promise<void>;
   fetchImportReceipts: () => Promise<void>;
   createImportReceipt: (input: CreateImportReceipt) => Promise<void>;
+  updateImportReceipt: (input: UpdateImportReceipt) => Promise<void>;
   fetchExportReceipts: () => Promise<void>;
   createExportReceipt: (input: CreateExportReceipt) => Promise<ExportReceipt>;
   fetchDashboard: () => Promise<void>;
@@ -92,10 +94,11 @@ export const useInventoryStore = create<InventoryState>((set) => ({
   createProduct: async (input) => {
     set({ loading: true, error: null });
     try {
-      await api.createProduct(input);
+      const product = await api.createProduct(input);
       const products = await api.getProducts();
       const dashboardStats = await api.getDashboardStats();
       set({ products, dashboardStats, loading: false });
+      return product;
     } catch (error) {
       set({
         loading: false,
@@ -290,6 +293,35 @@ export const useInventoryStore = create<InventoryState>((set) => ({
       set({
         loading: false,
         error: error instanceof Error ? error.message : "Không thể tạo phiếu nhập",
+      });
+      throw error;
+    }
+  },
+
+  updateImportReceipt: async (input) => {
+    set({ loading: true, error: null });
+    try {
+      await api.updateImportReceipt(input);
+      const [products, suppliers, importReceipts, dashboardStats, inventoryHistory] =
+        await Promise.all([
+          api.getProducts(),
+          api.getSuppliers(),
+          api.getImportReceipts(),
+          api.getDashboardStats(),
+          api.getInventoryHistory(),
+        ]);
+      set({
+        products,
+        suppliers,
+        importReceipts,
+        dashboardStats,
+        inventoryHistory,
+        loading: false,
+      });
+    } catch (error) {
+      set({
+        loading: false,
+        error: error instanceof Error ? error.message : "Không thể sửa phiếu nhập",
       });
       throw error;
     }

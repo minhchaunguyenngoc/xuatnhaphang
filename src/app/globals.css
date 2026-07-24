@@ -138,8 +138,11 @@
     visibility: visible;
   }
   .invoice-print-area {
-    position: absolute;
-    inset: 0;
+    /* Cha (DialogContent) không còn fixed/translate khi in (xem
+       print:!static ở invoice-print-dialog.tsx) — để nội dung chảy tự nhiên
+       từ đầu trang thay vì định vị tuyệt đối theo tâm màn hình cũ, tránh bị
+       thụt xuống giữa/cuối trang A4. */
+    position: static;
     width: 100%;
   }
   .no-print {

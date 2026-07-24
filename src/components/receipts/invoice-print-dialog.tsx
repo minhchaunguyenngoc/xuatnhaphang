@@ -15,7 +15,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { useCompanyStore } from "@/stores/company-store";
-import type { ExportReceipt, ImportReceipt } from "@/lib/types";
+import type { ExportReceipt, ImportReceipt, ReturnReceipt } from "@/lib/types";
+
+type InvoiceType = "import" | "export" | "customer_return" | "supplier_return";
 
 interface PartnerDetail {
   phone?: string | null;
@@ -25,10 +27,13 @@ interface PartnerDetail {
 interface InvoicePrintDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  type: "import" | "export";
-  receipt: ImportReceipt | ExportReceipt | null;
+  type: InvoiceType;
+  receipt: ImportReceipt | ExportReceipt | ReturnReceipt | null;
   /** Thông tin liên hệ đối tác (khách/NCC) để điền sẵn, có thể sửa trước khi in. */
   partner?: PartnerDetail | null;
+  /** Tên đối tác hiển thị — bắt buộc cho phiếu trả hàng vì ReturnReceipt
+   * không tự lưu tên khách/NCC (phải lấy từ phiếu gốc). */
+  partnerName?: string | null;
 }
 
 export function InvoicePrintDialog({
@@ -37,16 +42,23 @@ export function InvoicePrintDialog({
   type,
   receipt,
   partner,
+  partnerName: partnerNameOverride,
 }: InvoicePrintDialogProps) {
   const company = useCompanyStore();
 
   const partnerName =
-    type === "import"
+    partnerNameOverride ??
+    (type === "import"
       ? (receipt as ImportReceipt | null)?.supplier
-      : (receipt as ExportReceipt | null)?.customer;
+      : type === "export"
+        ? (receipt as ExportReceipt | null)?.customer
+        : null);
 
   // Khối thông tin đối tác sửa được (chỉ cho lần in này, không lưu DB).
   const [buyer, setBuyer] = useState({ name: "", phone: "", address: "" });
+  // Chỉ ẩn/hiện dòng chiết khấu KHI IN — số liệu chiết khấu vẫn được lưu và
+  // dùng đúng cho báo cáo/công nợ ở phía sau, không phụ thuộc lựa chọn này.
+  const [printDiscount, setPrintDiscount] = useState(true);
   const [prevId, setPrevId] = useState<number | null>(null);
   if (receipt && receipt.id !== prevId) {
     setPrevId(receipt.id);
@@ -55,6 +67,7 @@ export function InvoicePrintDialog({
       phone: partner?.phone ?? "",
       address: partner?.address ?? "",
     });
+    setPrintDiscount(true);
   }
 
   if (!receipt) return null;
@@ -66,6 +79,16 @@ export function InvoicePrintDialog({
     (sum, item) => sum + item.total_price,
     0,
   );
+  // Bỏ tích "in chiết khấu" → ẩn dòng chiết khấu, đồng thời phân bổ chiết
+  // khấu vào thẳng đơn giá từng dòng (theo tỷ lệ, giống cách get_profit_report
+  // phân bổ chiết khấu theo dòng) để tổng các dòng khớp đúng "Tổng cộng",
+  // không có dòng nào lộ ra là đã giảm giá.
+  const hideDiscountBreakdown =
+    exportReceipt !== null && !printDiscount && exportReceipt.discount > 0;
+  const priceRatio =
+    hideDiscountBreakdown && itemsSubtotal > 0
+      ? receipt.total_amount / itemsSubtotal
+      : 1;
   // `amount_paid` là tiền khách đưa (tender); kẹp vào [0, total] để ra số đã áp
   // vào hóa đơn, phần dư là tiền thừa, phần thiếu là còn nợ.
   const paidApplied = exportReceipt
@@ -80,14 +103,20 @@ export function InvoicePrintDialog({
   const paymentMethodLabel =
     exportReceipt?.payment_method === "transfer" ? "Chuyển khoản" : "Tiền mặt";
 
-  const partnerLabel = type === "import" ? "Nhà cung cấp" : "Khách hàng";
-  const title = type === "import" ? "PHIẾU NHẬP KHO" : "PHIẾU XUẤT KHO";
+  const partnerLabel =
+    type === "import" || type === "supplier_return" ? "Nhà cung cấp" : "Khách hàng";
+  const title = {
+    import: "PHIẾU NHẬP KHO",
+    export: "PHIẾU XUẤT KHO",
+    customer_return: "PHIẾU TRẢ HÀNG (KHÁCH)",
+    supplier_return: "PHIẾU TRẢ HÀNG (NHÀ CUNG CẤP)",
+  }[type];
   const hasCompany =
     company.name || company.address || company.phone || company.taxCode;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl sm:max-w-3xl print:max-w-none print:rounded-none print:border-none print:p-0 print:shadow-none print:ring-0">
+      <DialogContent className="max-w-3xl sm:max-w-3xl print:max-w-none print:rounded-none print:border-none print:p-0 print:shadow-none print:ring-0 print:!static print:!inset-auto print:!translate-x-0 print:!translate-y-0">
         {/* Khu vực chỉnh sửa thông tin khách — không in ra */}
         <div className="no-print space-y-2 rounded-lg border bg-muted/40 p-3">
           <p className="text-xs font-medium text-muted-foreground">
@@ -119,6 +148,17 @@ export function InvoicePrintDialog({
               />
             </div>
           </div>
+          {exportReceipt && exportReceipt.discount > 0 ? (
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={printDiscount}
+                onChange={(e) => setPrintDiscount(e.target.checked)}
+              />
+              In dòng chiết khấu trên hóa đơn (bỏ tích vẫn tính đúng chiết khấu
+              cho báo cáo, chỉ ẩn khi in)
+            </label>
+          ) : null}
         </div>
 
         <div className="invoice-print-area space-y-6 bg-white p-2 text-black">
@@ -195,10 +235,10 @@ export function InvoicePrintDialog({
                   <td className="py-1.5">{item.product_name}</td>
                   <td className="py-1.5 text-right">{item.quantity}</td>
                   <td className="py-1.5 text-right">
-                    {formatCurrency(item.unit_price)}
+                    {formatCurrency(item.unit_price * priceRatio)}
                   </td>
                   <td className="py-1.5 text-right">
-                    {formatCurrency(item.total_price)}
+                    {formatCurrency(item.total_price * priceRatio)}
                   </td>
                 </tr>
               ))}
@@ -207,7 +247,7 @@ export function InvoicePrintDialog({
 
           <div className="flex justify-end">
             <div className="w-72 space-y-1 text-sm">
-              {exportReceipt ? (
+              {exportReceipt && printDiscount ? (
                 <>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Tổng tiền hàng</span>
@@ -268,7 +308,9 @@ export function InvoicePrintDialog({
             </div>
             <div>
               <p className="font-medium">
-                {type === "import" ? "Người giao hàng" : "Người nhận hàng"}
+                {type === "import" || type === "supplier_return"
+                  ? "Người giao hàng"
+                  : "Người nhận hàng"}
               </p>
               <p className="text-muted-foreground">(Ký, ghi rõ họ tên)</p>
             </div>
@@ -281,7 +323,7 @@ export function InvoicePrintDialog({
           </Button>
           <Button onClick={() => window.print()}>
             <Printer className="mr-2 h-4 w-4" />
-            In hóa đơn
+            In phiếu
           </Button>
         </DialogFooter>
       </DialogContent>
