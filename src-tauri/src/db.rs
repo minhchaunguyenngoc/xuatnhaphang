@@ -7,6 +7,10 @@ use tauri::Manager;
 
 use crate::models::*;
 
+/// Hàng thô từ bảng `users`: (id, username, password_hash, full_name,
+/// is_admin, is_active, created_at, updated_at).
+type UserRow = (i64, String, String, String, bool, bool, String, String);
+
 /// Tạo lỗi nghiệp vụ mang thông điệp tiếng Việt. Dùng biến thể
 /// `InvalidParameterName(String)` làm "hộp" chứa chuỗi; tầng commands
 /// (`map_err_vi`) rút đúng chuỗi này ra để hiển thị, không kèm prefix kỹ thuật.
@@ -413,9 +417,11 @@ impl Database {
     }
 
     /// Tạo sản phẩm mới. Nếu bỏ trống `code`:
+    ///
     /// - Nếu đã có sản phẩm trùng CẢ tên lẫn giá nhập/giá xuất → coi là cùng
     ///   1 sản phẩm, trả về sản phẩm đó thay vì tạo bản ghi trùng.
     /// - Ngược lại tự sinh mã mới (SP0001, SP0002, ...).
+    ///
     /// Người dùng vẫn có thể tự gõ mã riêng — chỉ áp dụng logic này khi để trống.
     pub fn create_product(&self, input: CreateProduct) -> SqlResult<Product> {
         let conn = self.conn.lock().unwrap();
@@ -489,12 +495,11 @@ impl Database {
             // Khi còn tồn kho, `import_price` là giá vốn bình quân do hệ thống tự
             // duy trì (theo nhập + FIFO) — không cho sửa tay để tránh sai định giá
             // (Issue 15). Chỉ nhận `import_price` từ input khi tồn = 0.
-            let (stock, current_cost, current_export_price): (i64, f64, f64) = conn
-                .query_row(
-                    "SELECT stock_quantity, import_price, export_price FROM products WHERE id = ?1",
-                    params![input.id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?;
+            let (stock, current_cost, current_export_price): (i64, f64, f64) = conn.query_row(
+                "SELECT stock_quantity, import_price, export_price FROM products WHERE id = ?1",
+                params![input.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
             let import_price = if stock > 0 {
                 current_cost
             } else {
@@ -1001,9 +1006,7 @@ impl Database {
             |row| row.get(0),
         )?;
         if touched > 0 {
-            return Err(app_err(
-                "Phiếu nhập đã có hàng được xuất, không thể sửa.",
-            ));
+            return Err(app_err("Phiếu nhập đã có hàng được xuất, không thể sửa."));
         }
 
         let (old_supplier_id, old_total): (Option<i64>, f64) = tx.query_row(
@@ -1712,7 +1715,10 @@ impl Database {
             })?;
             for item in rows {
                 let item = item?;
-                items_by_return.entry(item.return_id).or_default().push(item);
+                items_by_return
+                    .entry(item.return_id)
+                    .or_default()
+                    .push(item);
             }
         }
 
@@ -1771,9 +1777,7 @@ impl Database {
         Ok(ReturnReceipt { items, ..receipt })
     }
 
-    fn map_user_row(
-        row: &rusqlite::Row,
-    ) -> SqlResult<(i64, String, String, String, bool, bool, String, String)> {
+    fn map_user_row(row: &rusqlite::Row) -> SqlResult<UserRow> {
         Ok((
             row.get(0)?,
             row.get(1)?,
@@ -2662,15 +2666,25 @@ mod tests {
     #[test]
     fn create_product_auto_generates_code_when_blank() {
         let db = Database::new_memory();
-        let p = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
-        assert!(p.code.starts_with("SP"), "mã phải tự sinh, thực tế {}", p.code);
+        let p = db
+            .create_product(new_product_input("Áo thun", 50.0, 80.0))
+            .unwrap();
+        assert!(
+            p.code.starts_with("SP"),
+            "mã phải tự sinh, thực tế {}",
+            p.code
+        );
     }
 
     #[test]
     fn create_product_reuses_existing_when_name_and_prices_match() {
         let db = Database::new_memory();
-        let first = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
-        let second = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
+        let first = db
+            .create_product(new_product_input("Áo thun", 50.0, 80.0))
+            .unwrap();
+        let second = db
+            .create_product(new_product_input("Áo thun", 50.0, 80.0))
+            .unwrap();
         assert_eq!(
             first.id, second.id,
             "trùng tên + cả 2 giá phải dùng lại đúng sản phẩm cũ"
@@ -2680,8 +2694,12 @@ mod tests {
     #[test]
     fn create_product_creates_new_when_price_differs() {
         let db = Database::new_memory();
-        let first = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
-        let second = db.create_product(new_product_input("Áo thun", 50.0, 90.0)).unwrap();
+        let first = db
+            .create_product(new_product_input("Áo thun", 50.0, 80.0))
+            .unwrap();
+        let second = db
+            .create_product(new_product_input("Áo thun", 50.0, 90.0))
+            .unwrap();
         assert_ne!(
             first.id, second.id,
             "khác giá xuất phải tạo sản phẩm mới, không dùng chung mã"
@@ -2692,7 +2710,9 @@ mod tests {
     #[test]
     fn update_product_logs_export_price_change_to_history() {
         let db = Database::new_memory();
-        let p = db.create_product(new_product_input("Áo thun", 50.0, 80.0)).unwrap();
+        let p = db
+            .create_product(new_product_input("Áo thun", 50.0, 80.0))
+            .unwrap();
 
         db.update_product(UpdateProduct {
             id: p.id,
