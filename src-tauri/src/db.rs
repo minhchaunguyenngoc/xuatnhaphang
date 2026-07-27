@@ -1405,6 +1405,27 @@ impl Database {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
+        // Chiết khấu của phiếu bán gốc phải được trừ vào giá trị trả hàng,
+        // giống hệt cách get_profit_report phân bổ chiết khấu theo tỷ lệ dòng
+        // (`ei.total_price / tổng dòng`) — nếu không, trả hàng sẽ hoàn lại
+        // đúng giá niêm yết (giá trị tổng bán + phần đã bớt), nhiều hơn số
+        // khách thực trả.
+        let receipt_total: f64 = tx.query_row(
+            "SELECT total_amount FROM export_receipts WHERE id = ?1",
+            params![input.original_receipt_id],
+            |row| row.get(0),
+        )?;
+        let items_total: f64 = tx.query_row(
+            "SELECT COALESCE(SUM(total_price), 0) FROM export_items WHERE receipt_id = ?1",
+            params![input.original_receipt_id],
+            |row| row.get(0),
+        )?;
+        let discount_ratio = if items_total > 0.0 {
+            receipt_total / items_total
+        } else {
+            1.0
+        };
+
         struct Line {
             original_item_id: i64,
             product_id: i64,
@@ -1444,7 +1465,8 @@ impl Database {
                 original_item_id: item.original_item_id,
                 product_id,
                 quantity: item.quantity,
-                unit_price,
+                // Giá trị hoàn trả tính theo giá đã trừ chiết khấu phiếu gốc.
+                unit_price: unit_price * discount_ratio,
                 cost_price,
             });
         }
@@ -2035,12 +2057,23 @@ impl Database {
             [],
             |row| row.get(0),
         )?;
+        // Trừ hàng khách trả trong tháng — đối xứng với cách phiếu bán cộng
+        // doanh thu, để "Doanh thu tháng" không bị ảo cao hơn thực tế.
+        let customer_return_total_month: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(rr.total_amount), 0) FROM return_receipts rr
+             WHERE rr.return_type = 'customer'
+               AND strftime('%Y-%m', rr.date) = strftime('%Y-%m', 'now', 'localtime')",
+            [],
+            |row| row.get(0),
+        )?;
         let export_total_month: f64 = conn.query_row(
             "SELECT COALESCE(SUM(total_amount), 0) FROM export_receipts WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')",
             [],
             |row| row.get(0),
         )?;
-        // Lợi nhuận = (doanh thu dòng - giá vốn FIFO) - chiết khấu cấp phiếu (Issue 2+3).
+        let export_total_month = export_total_month - customer_return_total_month;
+        // Lợi nhuận = (doanh thu dòng - giá vốn FIFO) - chiết khấu cấp phiếu (Issue 2+3)
+        // - hàng khách trả (doanh thu trả - giá vốn hàng trả).
         // Trừ discount MỘT lần/phiếu, không nhân theo số dòng.
         let profit_month: f64 = conn.query_row(
             "SELECT COALESCE((
@@ -2052,6 +2085,13 @@ impl Database {
              - COALESCE((
                  SELECT SUM(discount) FROM export_receipts
                  WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+             ), 0)
+             - COALESCE((
+                 SELECT SUM(ri.total_price - ri.quantity * ri.cost_price)
+                 FROM return_items ri
+                 JOIN return_receipts rr ON rr.id = ri.return_id
+                 WHERE rr.return_type = 'customer'
+                   AND strftime('%Y-%m', rr.date) = strftime('%Y-%m', 'now', 'localtime')
              ), 0)",
             [],
             |row| row.get(0),
@@ -2082,32 +2122,105 @@ impl Database {
              JOIN (SELECT receipt_id, SUM(total_price) AS items_total
                    FROM export_items GROUP BY receipt_id) rt ON rt.receipt_id = ei.receipt_id
              WHERE er.date BETWEEN ?1 AND ?2
-             GROUP BY ei.product_id, p.code, p.name
-             ORDER BY (SUM(ei.total_price - COALESCE(er.discount * ei.total_price / NULLIF(rt.items_total, 0), 0)) - SUM(ei.quantity * ei.cost_price)) DESC",
+             GROUP BY ei.product_id, p.code, p.name",
         )?;
 
-        let by_product = stmt
+        struct Row {
+            product_id: i64,
+            product_code: String,
+            product_name: String,
+            quantity: i64,
+            revenue: f64,
+            cost: f64,
+        }
+
+        let mut by_product: Vec<Row> = stmt
             .query_map(params![from, to], |row| {
-                let revenue: f64 = row.get(4)?;
-                let cost: f64 = row.get(5)?;
-                let profit = revenue - cost;
-                let margin_percent = if revenue > 0.0 {
-                    profit / revenue * 100.0
-                } else {
-                    0.0
-                };
-                Ok(ProductProfitRow {
+                Ok(Row {
                     product_id: row.get(0)?,
                     product_code: row.get(1)?,
                     product_name: row.get(2)?,
-                    quantity_sold: row.get(3)?,
-                    revenue,
-                    cost,
-                    profit,
-                    margin_percent,
+                    quantity: row.get(3)?,
+                    revenue: row.get(4)?,
+                    cost: row.get(5)?,
                 })
             })?
             .collect::<SqlResult<Vec<_>>>()?;
+
+        // Trừ hàng khách trả trong kỳ — return_items.unit_price đã trừ đúng
+        // chiết khấu của phiếu bán gốc (create_customer_return), cost_price là
+        // giá vốn thực đã bán ra. Trả hàng làm giảm cả doanh thu lẫn giá vốn
+        // đã ghi nhận, đối xứng với lúc bán.
+        let mut return_stmt = conn.prepare(
+            "SELECT ri.product_id, p.code, p.name,
+                    SUM(ri.quantity) AS qty,
+                    SUM(ri.total_price) AS revenue,
+                    SUM(ri.quantity * ri.cost_price) AS cost
+             FROM return_items ri
+             JOIN return_receipts rr ON rr.id = ri.return_id
+             JOIN products p ON p.id = ri.product_id
+             WHERE rr.return_type = 'customer' AND rr.date BETWEEN ?1 AND ?2
+             GROUP BY ri.product_id, p.code, p.name",
+        )?;
+        let returns = return_stmt
+            .query_map(params![from, to], |row| {
+                Ok(Row {
+                    product_id: row.get(0)?,
+                    product_code: row.get(1)?,
+                    product_name: row.get(2)?,
+                    quantity: row.get(3)?,
+                    revenue: row.get(4)?,
+                    cost: row.get(5)?,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+
+        for ret in returns {
+            if let Some(existing) = by_product
+                .iter_mut()
+                .find(|r| r.product_id == ret.product_id)
+            {
+                existing.quantity -= ret.quantity;
+                existing.revenue -= ret.revenue;
+                existing.cost -= ret.cost;
+            } else {
+                by_product.push(Row {
+                    product_id: ret.product_id,
+                    product_code: ret.product_code,
+                    product_name: ret.product_name,
+                    quantity: -ret.quantity,
+                    revenue: -ret.revenue,
+                    cost: -ret.cost,
+                });
+            }
+        }
+
+        let mut by_product: Vec<ProductProfitRow> = by_product
+            .into_iter()
+            .map(|r| {
+                let profit = r.revenue - r.cost;
+                let margin_percent = if r.revenue > 0.0 {
+                    profit / r.revenue * 100.0
+                } else {
+                    0.0
+                };
+                ProductProfitRow {
+                    product_id: r.product_id,
+                    product_code: r.product_code,
+                    product_name: r.product_name,
+                    quantity_sold: r.quantity,
+                    revenue: r.revenue,
+                    cost: r.cost,
+                    profit,
+                    margin_percent,
+                }
+            })
+            .collect();
+        by_product.sort_by(|a, b| {
+            b.profit
+                .partial_cmp(&a.profit)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let total_revenue: f64 = by_product.iter().map(|r| r.revenue).sum();
         let total_cost: f64 = by_product.iter().map(|r| r.cost).sum();
@@ -2456,6 +2569,59 @@ mod tests {
         );
     }
 
+    // Trả hàng khách trong kỳ phải trừ vào báo cáo lợi nhuận, đối xứng với
+    // lúc bán — không thì báo cáo vẫn tính như hàng chưa từng bị trả lại.
+    #[test]
+    fn profit_report_subtracts_customer_returns() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-06-01", p, 10, 40.0);
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-06-15",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        // Trước khi trả: doanh thu 500, giá vốn 200, LN 300.
+        let before = db.get_profit_report("2026-06-01", "2026-06-30").unwrap();
+        assert!((before.total_revenue - 500.0).abs() < 1e-9);
+        assert!((before.total_profit - 300.0).abs() < 1e-9);
+
+        db.create_customer_return(CreateCustomerReturn {
+            receipt_number: "PT1".into(),
+            original_receipt_id: sale.id,
+            date: "2026-06-16".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: sale.items[0].id,
+                product_id: p,
+                quantity: 2,
+            }],
+        })
+        .unwrap();
+
+        // Trả 2/5 → doanh thu còn 300, giá vốn còn 120, LN còn 180.
+        let after = db.get_profit_report("2026-06-01", "2026-06-30").unwrap();
+        assert!(
+            (after.total_revenue - 300.0).abs() < 1e-9,
+            "revenue sau trả hàng phải là 300, thực tế {}",
+            after.total_revenue
+        );
+        assert!(
+            (after.total_profit - 180.0).abs() < 1e-9,
+            "profit sau trả hàng phải là 180, thực tế {}",
+            after.total_profit
+        );
+    }
+
     #[test]
     fn update_import_receipt_allowed_when_untouched() {
         let db = Database::new_memory();
@@ -2587,6 +2753,65 @@ mod tests {
             }],
         });
         assert!(over.is_err(), "không được trả vượt quá số lượng còn lại");
+    }
+
+    // Trả hàng phải trừ đúng chiết khấu của phiếu bán gốc — trả lại đúng số
+    // tiền khách đã thực trả, không phải giá niêm yết trước chiết khấu.
+    #[test]
+    fn customer_return_value_accounts_for_original_discount() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        // Bán 10 cái giá 100 = 1.000, bớt 400 → khách chỉ trả 600.
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            400.0,
+            600.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 10,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        assert!((sale.total_amount - 600.0).abs() < 1e-9);
+
+        let export_item_id = sale.items[0].id;
+        let ret = db
+            .create_customer_return(CreateCustomerReturn {
+                receipt_number: "PT1".into(),
+                original_receipt_id: sale.id,
+                date: "2026-01-03".into(),
+                note: None,
+                items: vec![ReturnItemInput {
+                    original_item_id: export_item_id,
+                    product_id: p,
+                    quantity: 10,
+                }],
+            })
+            .unwrap();
+        assert!(
+            (ret.total_amount - 600.0).abs() < 1e-9,
+            "trả hết 10 cái phải hoàn đúng 600 (đã trừ chiết khấu), thực tế {}",
+            ret.total_amount
+        );
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt).abs() < 1e-9,
+            "nợ phải về đúng 0, không âm và không còn dư"
+        );
     }
 
     #[test]

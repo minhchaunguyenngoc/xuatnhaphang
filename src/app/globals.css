@@ -138,12 +138,20 @@
     visibility: visible;
   }
   .invoice-print-area {
-    /* Cha (DialogContent) không còn fixed/translate khi in (xem
-       print:!static ở invoice-print-dialog.tsx) — để nội dung chảy tự nhiên
-       từ đầu trang thay vì định vị tuyệt đối theo tâm màn hình cũ, tránh bị
-       thụt xuống giữa/cuối trang A4. */
-    position: static;
+    /* `visibility: hidden` (khác `display: none`) vẫn giữ nguyên chỗ chiếm
+       layout của các phần tử ẩn — nếu trang nền (bảng dài, v.v.) đang cao thì
+       toàn bộ chiều cao vô hình đó vẫn đẩy vùng in xuống, tràn sang trang 2.
+       Phải dùng `position: absolute` để tách hẳn khỏi luồng layout và ghim
+       thẳng lên đầu trang in, không phụ thuộc nội dung ẩn phía trước nó. */
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
+  }
+  /* Nền mờ phía sau dialog cũng phải bỏ hẳn khỏi luồng khi in, không chỉ ẩn
+     visibility — tránh mọi khả năng vẫn chiếm khoảng trống trang 1. */
+  [data-slot="dialog-overlay"] {
+    display: none !important;
   }
   .no-print {
     display: none !important;
