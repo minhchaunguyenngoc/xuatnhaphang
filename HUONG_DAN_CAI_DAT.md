@@ -2,6 +2,12 @@
 
 Phần mềm quản lý Nhập – Xuất hàng, chạy hoàn toàn trên máy tính của bạn (không cần internet, không lưu dữ liệu lên đâu khác).
 
+## Có gì mới trong bản 0.2.1
+
+- **Sửa lỗi trả hàng tính sai giá trị khi đơn gốc có chiết khấu** — trước đây hoàn lại đúng giá niêm yết (nhiều hơn số khách thực trả), giờ trừ đúng phần đã bớt giá.
+- **Sửa lỗi báo cáo không trừ hàng trả** — Báo cáo lợi nhuận và số liệu Tổng quan giờ trừ đúng phần hàng khách trả trong kỳ.
+- **Sửa lỗi in phiếu bị tràn sang trang 2** — nội dung giờ luôn nằm gọn ở đầu trang 1.
+
 ## Có gì mới trong bản 0.2.0
 
 - **Đăng nhập & phân quyền nhân viên** — mỗi người 1 tài khoản riêng, cấp đúng quyền cần dùng (xem chi tiết ở mục 5 bên dưới).
