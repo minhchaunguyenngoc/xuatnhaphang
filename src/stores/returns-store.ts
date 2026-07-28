@@ -1,31 +1,50 @@
 import { create } from "zustand";
 
 import { api } from "@/lib/api";
+import { PAGE_SIZE } from "@/stores/inventory-store";
 import type { CreateCustomerReturn, CreateSupplierReturn, ReturnReceipt } from "@/lib/types";
+import { getErrorMessage } from "@/lib/errors";
 
 interface ReturnsState {
   returnReceipts: ReturnReceipt[];
+  returnReceiptsTotal: number;
+  returnReceiptsPage: number;
+  returnReceiptsSearch: string;
   loading: boolean;
   error: string | null;
-  fetchReturnReceipts: () => Promise<void>;
+  fetchReturnReceipts: (opts?: { page?: number; search?: string }) => Promise<void>;
   createCustomerReturn: (input: CreateCustomerReturn) => Promise<ReturnReceipt>;
   createSupplierReturn: (input: CreateSupplierReturn) => Promise<ReturnReceipt>;
 }
 
-export const useReturnsStore = create<ReturnsState>((set) => ({
+export const useReturnsStore = create<ReturnsState>((set, get) => ({
   returnReceipts: [],
+  returnReceiptsTotal: 0,
+  returnReceiptsPage: 1,
+  returnReceiptsSearch: "",
   loading: false,
   error: null,
 
-  fetchReturnReceipts: async () => {
-    set({ loading: true, error: null });
+  fetchReturnReceipts: async (opts) => {
+    const page = opts?.page ?? get().returnReceiptsPage;
+    const search = opts?.search ?? get().returnReceiptsSearch;
+    set({
+      loading: true,
+      error: null,
+      returnReceiptsPage: page,
+      returnReceiptsSearch: search,
+    });
     try {
-      const returnReceipts = await api.getReturnReceipts();
-      set({ returnReceipts, loading: false });
+      const { items, total } = await api.getReturnReceipts({
+        search: search.trim() ? search.trim() : null,
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+      });
+      set({ returnReceipts: items, returnReceiptsTotal: total, loading: false });
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tải phiếu trả hàng",
+        error: getErrorMessage(error, "Không thể tải phiếu trả hàng"),
       });
     }
   },
@@ -34,13 +53,13 @@ export const useReturnsStore = create<ReturnsState>((set) => ({
     set({ loading: true, error: null });
     try {
       const receipt = await api.createCustomerReturn(input);
-      const returnReceipts = await api.getReturnReceipts();
-      set({ returnReceipts, loading: false });
+      await get().fetchReturnReceipts();
+      set({ loading: false });
       return receipt;
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tạo phiếu trả hàng",
+        error: getErrorMessage(error, "Không thể tạo phiếu trả hàng"),
       });
       throw error;
     }
@@ -50,13 +69,13 @@ export const useReturnsStore = create<ReturnsState>((set) => ({
     set({ loading: true, error: null });
     try {
       const receipt = await api.createSupplierReturn(input);
-      const returnReceipts = await api.getReturnReceipts();
-      set({ returnReceipts, loading: false });
+      await get().fetchReturnReceipts();
+      set({ loading: false });
       return receipt;
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tạo phiếu trả hàng",
+        error: getErrorMessage(error, "Không thể tạo phiếu trả hàng"),
       });
       throw error;
     }

@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Printer } from "lucide-react";
 
 import { InvoicePrintDialog } from "@/components/receipts/invoice-print-dialog";
+import { Pagination } from "@/components/shared/pagination";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -14,53 +17,46 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { formatCurrency, formatDate } from "@/lib/format";
 import type { ReturnReceipt } from "@/lib/types";
-import { useInventoryStore } from "@/stores/inventory-store";
 import { useReturnsStore } from "@/stores/returns-store";
 
 export default function ReturnsPage() {
-  const { importReceipts, exportReceipts, fetchImportReceipts, fetchExportReceipts } =
-    useInventoryStore();
-  const { returnReceipts, fetchReturnReceipts } = useReturnsStore();
+  const {
+    returnReceipts,
+    returnReceiptsTotal,
+    returnReceiptsPage,
+    fetchReturnReceipts,
+  } = useReturnsStore(
+    useShallow((s) => ({
+      returnReceipts: s.returnReceipts,
+      returnReceiptsTotal: s.returnReceiptsTotal,
+      returnReceiptsPage: s.returnReceiptsPage,
+      fetchReturnReceipts: s.fetchReturnReceipts,
+    })),
+  );
   const [printReceipt, setPrintReceipt] = useState<ReturnReceipt | null>(null);
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => {
-    void fetchReturnReceipts();
-    void fetchImportReceipts();
-    void fetchExportReceipts();
-  }, [fetchReturnReceipts, fetchImportReceipts, fetchExportReceipts]);
-
-  function partnerNameFor(receipt: ReturnReceipt): string {
-    if (receipt.return_type === "customer") {
-      return (
-        exportReceipts.find((r) => r.id === receipt.original_receipt_id)?.customer ??
-        "Khách lẻ"
-      );
-    }
-    return (
-      importReceipts.find((r) => r.id === receipt.original_receipt_id)?.supplier ?? "-"
-    );
-  }
-
-  function originalReceiptNumberFor(receipt: ReturnReceipt): string {
-    if (receipt.return_type === "customer") {
-      return (
-        exportReceipts.find((r) => r.id === receipt.original_receipt_id)
-          ?.receipt_number ?? "-"
-      );
-    }
-    return (
-      importReceipts.find((r) => r.id === receipt.original_receipt_id)
-        ?.receipt_number ?? "-"
-    );
-  }
+    void fetchReturnReceipts({ page: 1, search: debouncedSearch });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
 
   return (
     <div>
       <PageHeader
         title="Trả hàng"
         description="Lịch sử khách trả hàng đã mua và trả hàng cho nhà cung cấp — tạo phiếu trả từ nút Trả hàng trên trang Nhập hàng / Hóa đơn."
+      />
+
+      <Input
+        placeholder="Tìm theo số phiếu trả (gõ từ đầu số phiếu)"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        className="mb-4 max-w-sm"
       />
 
       <div className="rounded-lg border bg-card">
@@ -92,8 +88,11 @@ export default function ReturnsPage() {
                   <TableCell>
                     {receipt.return_type === "customer" ? "Khách trả" : "Trả NCC"}
                   </TableCell>
-                  <TableCell>{partnerNameFor(receipt)}</TableCell>
-                  <TableCell>{originalReceiptNumberFor(receipt)}</TableCell>
+                  <TableCell>
+                    {receipt.partner_name ??
+                      (receipt.return_type === "customer" ? "Khách lẻ" : "-")}
+                  </TableCell>
+                  <TableCell>{receipt.original_receipt_number ?? "-"}</TableCell>
                   <TableCell className="max-w-xs truncate">
                     {receipt.items.length === 0
                       ? "-"
@@ -119,6 +118,11 @@ export default function ReturnsPage() {
           </TableBody>
         </Table>
       </div>
+      <Pagination
+        page={returnReceiptsPage}
+        total={returnReceiptsTotal}
+        onPageChange={(page) => void fetchReturnReceipts({ page })}
+      />
 
       <InvoicePrintDialog
         open={!!printReceipt}
@@ -127,7 +131,10 @@ export default function ReturnsPage() {
         }}
         type={printReceipt?.return_type === "supplier" ? "supplier_return" : "customer_return"}
         receipt={printReceipt}
-        partnerName={printReceipt ? partnerNameFor(printReceipt) : null}
+        partnerName={
+          printReceipt?.partner_name ??
+          (printReceipt?.return_type === "customer" ? "Khách lẻ" : null)
+        }
       />
     </div>
   );

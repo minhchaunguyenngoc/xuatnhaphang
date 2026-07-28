@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 
+import { Pagination } from "@/components/shared/pagination";
 import { PageHeader } from "@/components/shared/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -13,6 +16,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { formatCurrency, formatDateTime, formatNumber } from "@/lib/format";
 import { useInventoryStore } from "@/stores/inventory-store";
 
@@ -50,19 +54,42 @@ function isNegativeMovement(movementType: string): boolean {
 }
 
 export default function InventoryPage() {
-  const { products, inventoryHistory, fetchProducts, fetchInventoryHistory } =
-    useInventoryStore();
+  const {
+    products,
+    productsTotal,
+    productsPage,
+    dashboardStats,
+    inventoryHistory,
+    fetchProducts,
+    fetchDashboard,
+    fetchInventoryHistory,
+  } = useInventoryStore(
+    useShallow((s) => ({
+      products: s.products,
+      productsTotal: s.productsTotal,
+      productsPage: s.productsPage,
+      dashboardStats: s.dashboardStats,
+      inventoryHistory: s.inventoryHistory,
+      fetchProducts: s.fetchProducts,
+      fetchDashboard: s.fetchDashboard,
+      fetchInventoryHistory: s.fetchInventoryHistory,
+    })),
+  );
   const [filter, setFilter] = useState<MovementFilter>("all");
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => {
-    void fetchProducts();
+    void fetchDashboard();
     void fetchInventoryHistory();
-  }, [fetchProducts, fetchInventoryHistory]);
+  }, [fetchDashboard, fetchInventoryHistory]);
 
-  const totalStockValue = products.reduce(
-    (sum, p) => sum + p.stock_quantity * p.import_price,
-    0,
-  );
+  useEffect(() => {
+    void fetchProducts({ page: 1, search: debouncedSearch });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
+
+  const totalStockValue = dashboardStats?.total_stock_value ?? 0;
 
   const filteredHistory = useMemo(() => {
     if (filter === "all") return inventoryHistory;
@@ -78,7 +105,7 @@ export default function InventoryPage() {
 
       {/* Tồn kho hiện tại */}
       <section className="space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-4">
           <h2 className="text-sm font-semibold">Tồn kho hiện tại</h2>
           <span className="text-sm text-muted-foreground">
             Tổng giá trị tồn:{" "}
@@ -87,6 +114,12 @@ export default function InventoryPage() {
             </span>
           </span>
         </div>
+        <Input
+          placeholder="Tìm theo mã hoặc tên hàng hóa"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="max-w-sm"
+        />
         <div className="rounded-lg border bg-card">
           <Table>
             <TableHeader>
@@ -134,6 +167,11 @@ export default function InventoryPage() {
             </TableBody>
           </Table>
         </div>
+        <Pagination
+          page={productsPage}
+          total={productsTotal}
+          onPageChange={(page) => void fetchProducts({ page })}
+        />
       </section>
 
       {/* Lịch sử xuất/nhập kho */}

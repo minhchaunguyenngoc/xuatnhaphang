@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { SupplierFormDialog } from "@/components/suppliers/supplier-form-dialog";
+import { Pagination } from "@/components/shared/pagination";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +16,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -22,6 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { formatCurrency } from "@/lib/format";
 import type { Supplier } from "@/lib/types";
 import { useInventoryStore } from "@/stores/inventory-store";
@@ -29,19 +33,34 @@ import { useInventoryStore } from "@/stores/inventory-store";
 export default function SuppliersPage() {
   const {
     suppliers,
+    suppliersTotal,
+    suppliersPage,
     fetchSuppliers,
     createSupplier,
     updateSupplier,
     deleteSupplier,
-  } = useInventoryStore();
+  } = useInventoryStore(
+    useShallow((s) => ({
+      suppliers: s.suppliers,
+      suppliersTotal: s.suppliersTotal,
+      suppliersPage: s.suppliersPage,
+      fetchSuppliers: s.fetchSuppliers,
+      createSupplier: s.createSupplier,
+      updateSupplier: s.updateSupplier,
+      deleteSupplier: s.deleteSupplier,
+    })),
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Supplier | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Supplier | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => {
-    void fetchSuppliers();
-  }, [fetchSuppliers]);
+    void fetchSuppliers({ page: 1, search: debouncedSearch });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
 
   return (
     <div>
@@ -59,6 +78,13 @@ export default function SuppliersPage() {
             Thêm nhà cung cấp
           </Button>
         }
+      />
+
+      <Input
+        placeholder="Tìm theo mã hoặc tên nhà cung cấp"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        className="mb-4 max-w-sm"
       />
 
       <div className="rounded-lg border bg-card">
@@ -119,6 +145,11 @@ export default function SuppliersPage() {
           </TableBody>
         </Table>
       </div>
+      <Pagination
+        page={suppliersPage}
+        total={suppliersTotal}
+        onPageChange={(page) => void fetchSuppliers({ page })}
+      />
 
       <SupplierFormDialog
         open={dialogOpen}

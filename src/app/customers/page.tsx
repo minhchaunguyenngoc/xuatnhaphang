@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { CustomerFormDialog } from "@/components/customers/customer-form-dialog";
+import { Pagination } from "@/components/shared/pagination";
 import { PageHeader } from "@/components/shared/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -23,6 +26,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { formatCurrency } from "@/lib/format";
 import type { Customer } from "@/lib/types";
 import { useInventoryStore } from "@/stores/inventory-store";
@@ -30,19 +34,34 @@ import { useInventoryStore } from "@/stores/inventory-store";
 export default function CustomersPage() {
   const {
     customers,
+    customersTotal,
+    customersPage,
     fetchCustomers,
     createCustomer,
     updateCustomer,
     deleteCustomer,
-  } = useInventoryStore();
+  } = useInventoryStore(
+    useShallow((s) => ({
+      customers: s.customers,
+      customersTotal: s.customersTotal,
+      customersPage: s.customersPage,
+      fetchCustomers: s.fetchCustomers,
+      createCustomer: s.createCustomer,
+      updateCustomer: s.updateCustomer,
+      deleteCustomer: s.deleteCustomer,
+    })),
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Customer | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Customer | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => {
-    void fetchCustomers();
-  }, [fetchCustomers]);
+    void fetchCustomers({ page: 1, search: debouncedSearch });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
 
   return (
     <div>
@@ -60,6 +79,13 @@ export default function CustomersPage() {
             Thêm khách hàng
           </Button>
         }
+      />
+
+      <Input
+        placeholder="Tìm theo mã hoặc tên khách hàng"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        className="mb-4 max-w-sm"
       />
 
       <div className="rounded-lg border bg-card">
@@ -130,6 +156,11 @@ export default function CustomersPage() {
           </TableBody>
         </Table>
       </div>
+      <Pagination
+        page={customersPage}
+        total={customersTotal}
+        onPageChange={(page) => void fetchCustomers({ page })}
+      />
 
       <CustomerFormDialog
         open={dialogOpen}

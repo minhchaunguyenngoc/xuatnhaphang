@@ -1,3 +1,16 @@
+//! Các lệnh Tauri mà frontend gọi qua `invoke`.
+//!
+//! **Mọi lệnh phải là `#[tauri::command(async)]`, đừng đổi lại `#[tauri::command]`.**
+//! Lệnh khai báo không có `async` sẽ chạy ngay trên MAIN THREAD của Tauri, nên
+//! mỗi truy vấn nặng làm đơ toàn bộ giao diện (không kéo được cửa sổ, không bấm
+//! được gì) cho tới khi truy vấn xong — rất rõ khi dữ liệu lớn.
+//!
+//! Thuộc tính `(async)` khiến macro sinh ra loại `sync_threadpool`: thân hàm
+//! vẫn viết đồng bộ như thường nhưng được chạy trong worker của tokio, main
+//! thread rảnh để vẽ giao diện. Cố tình KHÔNG đổi sang `pub async fn` vì
+//! `db.conn.lock()` trả về `MutexGuard` không `Send` — sẽ không biên dịch được
+//! ngay khi có ai thêm `.await` vào thân hàm.
+
 use tauri::State;
 
 use crate::db::Database;
@@ -22,72 +35,104 @@ fn map_err_vi(e: rusqlite::Error) -> String {
     }
 }
 
-#[tauri::command]
-pub fn get_products(db: State<'_, Database>) -> Result<Vec<Product>, String> {
-    db.get_products().map_err(map_err_vi)
+#[tauri::command(async)]
+pub fn get_products(
+    db: State<'_, Database>,
+    query: ListQuery,
+) -> Result<PagedResult<Product>, String> {
+    db.get_products(&query).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+pub fn get_low_stock_products(db: State<'_, Database>, limit: i64) -> Result<Vec<Product>, String> {
+    db.get_low_stock_products(limit).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn get_product_by_id(db: State<'_, Database>, id: i64) -> Result<Product, String> {
+    db.get_product_by_id(id).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
 pub fn create_product(db: State<'_, Database>, input: CreateProduct) -> Result<Product, String> {
     db.create_product(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_product(db: State<'_, Database>, input: UpdateProduct) -> Result<Product, String> {
     db.update_product(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_product(db: State<'_, Database>, id: i64) -> Result<(), String> {
     db.delete_product(id).map_err(map_err_vi)
 }
 
-#[tauri::command]
-pub fn get_customers(db: State<'_, Database>) -> Result<Vec<Customer>, String> {
-    db.get_customers().map_err(map_err_vi)
+#[tauri::command(async)]
+pub fn get_customers(
+    db: State<'_, Database>,
+    query: ListQuery,
+) -> Result<PagedResult<Customer>, String> {
+    db.get_customers(&query).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+pub fn get_customer_by_id(db: State<'_, Database>, id: i64) -> Result<Customer, String> {
+    db.get_customer_by_id(id).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
 pub fn create_customer(db: State<'_, Database>, input: CreateCustomer) -> Result<Customer, String> {
     db.create_customer(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_customer(db: State<'_, Database>, input: UpdateCustomer) -> Result<Customer, String> {
     db.update_customer(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_customer(db: State<'_, Database>, id: i64) -> Result<(), String> {
     db.delete_customer(id).map_err(map_err_vi)
 }
 
-#[tauri::command]
-pub fn get_suppliers(db: State<'_, Database>) -> Result<Vec<Supplier>, String> {
-    db.get_suppliers().map_err(map_err_vi)
+#[tauri::command(async)]
+pub fn get_suppliers(
+    db: State<'_, Database>,
+    query: ListQuery,
+) -> Result<PagedResult<Supplier>, String> {
+    db.get_suppliers(&query).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+pub fn get_supplier_by_id(db: State<'_, Database>, id: i64) -> Result<Supplier, String> {
+    db.get_supplier_by_id(id).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
 pub fn create_supplier(db: State<'_, Database>, input: CreateSupplier) -> Result<Supplier, String> {
     db.create_supplier(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_supplier(db: State<'_, Database>, input: UpdateSupplier) -> Result<Supplier, String> {
     db.update_supplier(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_supplier(db: State<'_, Database>, id: i64) -> Result<(), String> {
     db.delete_supplier(id).map_err(map_err_vi)
 }
 
-#[tauri::command]
-pub fn get_import_receipts(db: State<'_, Database>) -> Result<Vec<ImportReceipt>, String> {
-    db.get_import_receipts().map_err(map_err_vi)
+#[tauri::command(async)]
+pub fn get_import_receipts(
+    db: State<'_, Database>,
+    query: ListQuery,
+) -> Result<PagedResult<ImportReceipt>, String> {
+    db.get_import_receipts(&query).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_import_receipt(
     db: State<'_, Database>,
     input: CreateImportReceipt,
@@ -95,7 +140,7 @@ pub fn create_import_receipt(
     db.create_import_receipt(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_import_receipt(
     db: State<'_, Database>,
     input: UpdateImportReceipt,
@@ -103,12 +148,15 @@ pub fn update_import_receipt(
     db.update_import_receipt(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
-pub fn get_export_receipts(db: State<'_, Database>) -> Result<Vec<ExportReceipt>, String> {
-    db.get_export_receipts().map_err(map_err_vi)
+#[tauri::command(async)]
+pub fn get_export_receipts(
+    db: State<'_, Database>,
+    query: ListQuery,
+) -> Result<PagedResult<ExportReceipt>, String> {
+    db.get_export_receipts(&query).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_export_receipt(
     db: State<'_, Database>,
     input: CreateExportReceipt,
@@ -116,12 +164,15 @@ pub fn create_export_receipt(
     db.create_export_receipt(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
-pub fn get_return_receipts(db: State<'_, Database>) -> Result<Vec<ReturnReceipt>, String> {
-    db.get_return_receipts().map_err(map_err_vi)
+#[tauri::command(async)]
+pub fn get_return_receipts(
+    db: State<'_, Database>,
+    query: ListQuery,
+) -> Result<PagedResult<ReturnReceipt>, String> {
+    db.get_return_receipts(&query).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_customer_return(
     db: State<'_, Database>,
     input: CreateCustomerReturn,
@@ -129,7 +180,7 @@ pub fn create_customer_return(
     db.create_customer_return(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_supplier_return(
     db: State<'_, Database>,
     input: CreateSupplierReturn,
@@ -137,7 +188,7 @@ pub fn create_supplier_return(
     db.create_supplier_return(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_permissions() -> Vec<Permission> {
     crate::auth::PERMISSION_KEYS
         .iter()
@@ -148,42 +199,42 @@ pub fn get_permissions() -> Vec<Permission> {
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn login(db: State<'_, Database>, input: LoginInput) -> Result<User, String> {
     db.login(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_users(db: State<'_, Database>) -> Result<Vec<User>, String> {
     db.get_users().map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_user(db: State<'_, Database>, input: CreateUser) -> Result<User, String> {
     db.create_user(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_user(db: State<'_, Database>, input: UpdateUser) -> Result<User, String> {
     db.update_user(input).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_user(db: State<'_, Database>, id: i64) -> Result<(), String> {
     db.delete_user(id).map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_dashboard_stats(db: State<'_, Database>) -> Result<DashboardStats, String> {
     db.get_dashboard_stats().map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_inventory_history(db: State<'_, Database>) -> Result<Vec<InventoryHistory>, String> {
     db.get_inventory_history().map_err(map_err_vi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_profit_report(
     db: State<'_, Database>,
     from: String,

@@ -1,3 +1,16 @@
+/** Tham số tìm kiếm + phân trang dùng chung cho mọi danh sách có thể phình
+ * to (sản phẩm, khách hàng, NCC, phiếu nhập/xuất/trả hàng). */
+export interface ListQuery {
+  search?: string | null;
+  limit: number;
+  offset: number;
+}
+
+export interface PagedResult<T> {
+  items: T[];
+  total: number;
+}
+
 export interface Product {
   id: number;
   code: string;
@@ -266,6 +279,10 @@ export interface ReturnReceipt {
   total_amount: number;
   created_at: string;
   items: ReturnItem[];
+  /** Số phiếu gốc + tên đối tác — backend đã JOIN sẵn, khỏi phải tự tra cứu
+   * từ toàn bộ danh sách phiếu nhập/xuất. */
+  original_receipt_number: string | null;
+  partner_name: string | null;
 }
 
 export interface Permission {

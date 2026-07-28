@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ProductFormDialog } from "@/components/products/product-form-dialog";
+import { Pagination } from "@/components/shared/pagination";
 import { PageHeader } from "@/components/shared/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -23,6 +26,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { formatCurrency, formatNumber } from "@/lib/format";
 import type { Product } from "@/lib/types";
 import { useAuthStore } from "@/stores/auth-store";
@@ -32,16 +36,36 @@ export default function ProductsPage() {
   const canManageProducts = useAuthStore((state) =>
     state.hasPermission("products.manage"),
   );
-  const { products, fetchProducts, createProduct, updateProduct, deleteProduct } =
-    useInventoryStore();
+  const {
+    products,
+    productsTotal,
+    productsPage,
+    fetchProducts,
+    createProduct,
+    updateProduct,
+    deleteProduct,
+  } = useInventoryStore(
+    useShallow((s) => ({
+      products: s.products,
+      productsTotal: s.productsTotal,
+      productsPage: s.productsPage,
+      fetchProducts: s.fetchProducts,
+      createProduct: s.createProduct,
+      updateProduct: s.updateProduct,
+      deleteProduct: s.deleteProduct,
+    })),
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => {
-    void fetchProducts();
-  }, [fetchProducts]);
+    void fetchProducts({ page: 1, search: debouncedSearch });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
 
   return (
     <div>
@@ -61,6 +85,13 @@ export default function ProductsPage() {
             </Button>
           ) : null
         }
+      />
+
+      <Input
+        placeholder="Tìm theo mã hoặc tên hàng hóa"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        className="mb-4 max-w-sm"
       />
 
       <div className="rounded-lg border bg-card">
@@ -134,6 +165,11 @@ export default function ProductsPage() {
           </TableBody>
         </Table>
       </div>
+      <Pagination
+        page={productsPage}
+        total={productsTotal}
+        onPageChange={(page) => void fetchProducts({ page })}
+      />
 
       <ProductFormDialog
         open={dialogOpen}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { AlertTriangle, Package, TrendingDown, TrendingUp } from "lucide-react";
 
 import { PageHeader } from "@/components/shared/page-header";
@@ -22,21 +23,26 @@ export default function DashboardPage() {
   const {
     dashboardStats,
     inventoryHistory,
-    products,
+    lowStockProducts,
     fetchDashboard,
     fetchInventoryHistory,
-    fetchProducts,
-  } = useInventoryStore();
+    fetchLowStockProducts,
+  } = useInventoryStore(
+    useShallow((s) => ({
+      dashboardStats: s.dashboardStats,
+      inventoryHistory: s.inventoryHistory,
+      lowStockProducts: s.lowStockProducts,
+      fetchDashboard: s.fetchDashboard,
+      fetchInventoryHistory: s.fetchInventoryHistory,
+      fetchLowStockProducts: s.fetchLowStockProducts,
+    })),
+  );
 
   useEffect(() => {
     void fetchDashboard();
     void fetchInventoryHistory();
-    void fetchProducts();
-  }, [fetchDashboard, fetchInventoryHistory, fetchProducts]);
-
-  const lowStockProducts = products.filter(
-    (product) => product.stock_quantity <= product.min_stock,
-  );
+    void fetchLowStockProducts();
+  }, [fetchDashboard, fetchInventoryHistory, fetchLowStockProducts]);
 
   return (
     <div>

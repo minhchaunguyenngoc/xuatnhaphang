@@ -12,6 +12,7 @@ import type {
   ExportReceipt,
   ImportReceipt,
   InventoryHistory,
+  ListQuery,
   Product,
   ProfitReport,
   Supplier,
@@ -20,38 +21,104 @@ import type {
   UpdateProduct,
   UpdateSupplier,
 } from "@/lib/types";
+import { getErrorMessage } from "@/lib/errors";
+
+/** Số dòng mỗi trang cho mọi danh sách có phân trang trong app. */
+export const PAGE_SIZE = 20;
+/** Số kết quả tối đa cho ô tìm-chọn (POS, Combobox trong phiếu nhập) — không
+ * cần `total`, chỉ cần đủ gợi ý để người dùng gõ tiếp thu hẹp kết quả. */
+const SEARCH_LIMIT = 50;
+
+function pageQuery(page: number, search: string): ListQuery {
+  return {
+    search: search.trim() ? search.trim() : null,
+    limit: PAGE_SIZE,
+    offset: (page - 1) * PAGE_SIZE,
+  };
+}
+
+/**
+ * Tuỳ chọn cho các hàm ghi (tạo/sửa phiếu).
+ *
+ * Trước đây mỗi lần lưu phiếu đều tự động nạp lại products + customers/suppliers
+ * + danh sách phiếu + lịch sử kho + dashboard = 5-6 lượt gọi backend chặn trước
+ * khi màn hình phản hồi, kể cả khi trang đang mở chẳng hiển thị mấy thứ đó
+ * (POS là ví dụ rõ nhất). Giờ mặc định KHÔNG nạp lại; trang nào thực sự hiển thị
+ * danh sách phiếu thì truyền `{ refetch: true }` để nạp lại đúng danh sách đó.
+ */
+export interface MutationOpts {
+  refetch?: boolean;
+}
 
 interface InventoryState {
   products: Product[];
+  productsTotal: number;
+  productsPage: number;
+  productsSearch: string;
+  /** Top sản phẩm sắp hết hàng — cho widget Tổng quan, riêng biệt với danh
+   * sách đã phân trang ở trang Hàng hoá. */
+  lowStockProducts: Product[];
+
   customers: Customer[];
+  customersTotal: number;
+  customersPage: number;
+  customersSearch: string;
+
   suppliers: Supplier[];
+  suppliersTotal: number;
+  suppliersPage: number;
+  suppliersSearch: string;
+
   importReceipts: ImportReceipt[];
+  importReceiptsTotal: number;
+  importReceiptsPage: number;
+  importReceiptsSearch: string;
+
   exportReceipts: ExportReceipt[];
+  exportReceiptsTotal: number;
+  exportReceiptsPage: number;
+  exportReceiptsSearch: string;
+
   dashboardStats: DashboardStats | null;
   inventoryHistory: InventoryHistory[];
   profitReport: ProfitReport | null;
   loading: boolean;
   error: string | null;
-  fetchProducts: () => Promise<void>;
+
+  fetchProducts: (opts?: { page?: number; search?: string }) => Promise<void>;
+  /** Tìm sản phẩm cho ô tìm-chọn (POS, phiếu nhập) — không đụng tới danh
+   * sách phân trang ở trang Hàng hoá. */
+  searchProducts: (search: string) => Promise<Product[]>;
+  fetchLowStockProducts: () => Promise<void>;
   createProduct: (input: CreateProduct) => Promise<Product>;
   updateProduct: (input: UpdateProduct) => Promise<void>;
   deleteProduct: (id: number) => Promise<void>;
   importProducts: (
     inputs: CreateProduct[],
   ) => Promise<{ ok: number; failed: number }>;
-  fetchCustomers: () => Promise<void>;
+
+  fetchCustomers: (opts?: { page?: number; search?: string }) => Promise<void>;
+  searchCustomers: (search: string) => Promise<Customer[]>;
   createCustomer: (input: CreateCustomer) => Promise<Customer>;
   updateCustomer: (input: UpdateCustomer) => Promise<void>;
   deleteCustomer: (id: number) => Promise<void>;
-  fetchSuppliers: () => Promise<void>;
+
+  fetchSuppliers: (opts?: { page?: number; search?: string }) => Promise<void>;
+  searchSuppliers: (search: string) => Promise<Supplier[]>;
   createSupplier: (input: CreateSupplier) => Promise<Supplier>;
   updateSupplier: (input: UpdateSupplier) => Promise<void>;
   deleteSupplier: (id: number) => Promise<void>;
-  fetchImportReceipts: () => Promise<void>;
-  createImportReceipt: (input: CreateImportReceipt) => Promise<void>;
-  updateImportReceipt: (input: UpdateImportReceipt) => Promise<void>;
-  fetchExportReceipts: () => Promise<void>;
-  createExportReceipt: (input: CreateExportReceipt) => Promise<ExportReceipt>;
+
+  fetchImportReceipts: (opts?: { page?: number; search?: string }) => Promise<void>;
+  createImportReceipt: (input: CreateImportReceipt, opts?: MutationOpts) => Promise<void>;
+  updateImportReceipt: (input: UpdateImportReceipt, opts?: MutationOpts) => Promise<void>;
+
+  fetchExportReceipts: (opts?: { page?: number; search?: string }) => Promise<void>;
+  createExportReceipt: (
+    input: CreateExportReceipt,
+    opts?: MutationOpts,
+  ) => Promise<ExportReceipt>;
+
   fetchDashboard: () => Promise<void>;
   fetchInventoryHistory: () => Promise<void>;
   fetchProfitReport: (from: string, to: string) => Promise<void>;
@@ -66,28 +133,73 @@ const emptyStats: DashboardStats = {
   profit_month: 0,
 };
 
-export const useInventoryStore = create<InventoryState>((set) => ({
+export const useInventoryStore = create<InventoryState>((set, get) => ({
   products: [],
+  productsTotal: 0,
+  productsPage: 1,
+  productsSearch: "",
+  lowStockProducts: [],
+
   customers: [],
+  customersTotal: 0,
+  customersPage: 1,
+  customersSearch: "",
+
   suppliers: [],
+  suppliersTotal: 0,
+  suppliersPage: 1,
+  suppliersSearch: "",
+
   importReceipts: [],
+  importReceiptsTotal: 0,
+  importReceiptsPage: 1,
+  importReceiptsSearch: "",
+
   exportReceipts: [],
+  exportReceiptsTotal: 0,
+  exportReceiptsPage: 1,
+  exportReceiptsSearch: "",
+
   dashboardStats: null,
   inventoryHistory: [],
   profitReport: null,
   loading: false,
   error: null,
 
-  fetchProducts: async () => {
-    set({ loading: true, error: null });
+  fetchProducts: async (opts) => {
+    const page = opts?.page ?? get().productsPage;
+    const search = opts?.search ?? get().productsSearch;
+    set({ loading: true, error: null, productsPage: page, productsSearch: search });
     try {
-      const products = await api.getProducts();
-      set({ products, loading: false });
+      const { items, total } = await api.getProducts(pageQuery(page, search));
+      set({ products: items, productsTotal: total, loading: false });
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tải sản phẩm",
+        error: getErrorMessage(error, "Không thể tải sản phẩm"),
       });
+    }
+  },
+
+  searchProducts: async (search) => {
+    try {
+      const { items } = await api.getProducts({
+        search: search.trim() ? search.trim() : null,
+        limit: SEARCH_LIMIT,
+        offset: 0,
+      });
+      return items;
+    } catch {
+      return [];
+    }
+  },
+
+  fetchLowStockProducts: async () => {
+    try {
+      const lowStockProducts = await api.getLowStockProducts(5);
+      set({ lowStockProducts });
+    } catch {
+      set({ lowStockProducts: [] });
     }
   },
 
@@ -95,14 +207,14 @@ export const useInventoryStore = create<InventoryState>((set) => ({
     set({ loading: true, error: null });
     try {
       const product = await api.createProduct(input);
-      const products = await api.getProducts();
+      await get().fetchProducts();
       const dashboardStats = await api.getDashboardStats();
-      set({ products, dashboardStats, loading: false });
+      set({ dashboardStats, loading: false });
       return product;
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tạo sản phẩm",
+        error: getErrorMessage(error, "Không thể tạo sản phẩm"),
       });
       throw error;
     }
@@ -112,12 +224,11 @@ export const useInventoryStore = create<InventoryState>((set) => ({
     set({ loading: true, error: null });
     try {
       await api.updateProduct(input);
-      const products = await api.getProducts();
-      set({ products, loading: false });
+      await get().fetchProducts();
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể cập nhật sản phẩm",
+        error: getErrorMessage(error, "Không thể cập nhật sản phẩm"),
       });
       throw error;
     }
@@ -127,13 +238,13 @@ export const useInventoryStore = create<InventoryState>((set) => ({
     set({ loading: true, error: null });
     try {
       await api.deleteProduct(id);
-      const products = await api.getProducts();
+      await get().fetchProducts();
       const dashboardStats = await api.getDashboardStats();
-      set({ products, dashboardStats, loading: false });
+      set({ dashboardStats, loading: false });
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể xóa sản phẩm",
+        error: getErrorMessage(error, "Không thể xóa sản phẩm"),
       });
       throw error;
     }
@@ -152,33 +263,47 @@ export const useInventoryStore = create<InventoryState>((set) => ({
         failed += 1;
       }
     }
-    const [products, dashboardStats] = await Promise.all([
-      api.getProducts(),
-      api.getDashboardStats(),
-    ]);
-    set({ products, dashboardStats, loading: false });
+    await get().fetchProducts();
+    const dashboardStats = await api.getDashboardStats();
+    set({ dashboardStats, loading: false });
     return { ok, failed };
   },
 
-  fetchCustomers: async () => {
+  fetchCustomers: async (opts) => {
+    const page = opts?.page ?? get().customersPage;
+    const search = opts?.search ?? get().customersSearch;
+    set({ customersPage: page, customersSearch: search });
     try {
-      const customers = await api.getCustomers();
-      set({ customers });
+      const { items, total } = await api.getCustomers(pageQuery(page, search));
+      set({ customers: items, customersTotal: total });
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể tải khách hàng",
+        error: getErrorMessage(error, "Không thể tải khách hàng"),
       });
+    }
+  },
+
+  searchCustomers: async (search) => {
+    try {
+      const { items } = await api.getCustomers({
+        search: search.trim() ? search.trim() : null,
+        limit: SEARCH_LIMIT,
+        offset: 0,
+      });
+      return items;
+    } catch {
+      return [];
     }
   },
 
   createCustomer: async (input) => {
     try {
       const customer = await api.createCustomer(input);
-      set({ customers: await api.getCustomers() });
+      await get().fetchCustomers();
       return customer;
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể tạo khách hàng",
+        error: getErrorMessage(error, "Không thể tạo khách hàng"),
       });
       throw error;
     }
@@ -187,10 +312,10 @@ export const useInventoryStore = create<InventoryState>((set) => ({
   updateCustomer: async (input) => {
     try {
       await api.updateCustomer(input);
-      set({ customers: await api.getCustomers() });
+      await get().fetchCustomers();
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể cập nhật khách hàng",
+        error: getErrorMessage(error, "Không thể cập nhật khách hàng"),
       });
       throw error;
     }
@@ -199,34 +324,50 @@ export const useInventoryStore = create<InventoryState>((set) => ({
   deleteCustomer: async (id) => {
     try {
       await api.deleteCustomer(id);
-      set({ customers: await api.getCustomers() });
+      await get().fetchCustomers();
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể xóa khách hàng",
+        error: getErrorMessage(error, "Không thể xóa khách hàng"),
       });
       throw error;
     }
   },
 
-  fetchSuppliers: async () => {
+  fetchSuppliers: async (opts) => {
+    const page = opts?.page ?? get().suppliersPage;
+    const search = opts?.search ?? get().suppliersSearch;
+    set({ suppliersPage: page, suppliersSearch: search });
     try {
-      const suppliers = await api.getSuppliers();
-      set({ suppliers });
+      const { items, total } = await api.getSuppliers(pageQuery(page, search));
+      set({ suppliers: items, suppliersTotal: total });
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể tải nhà cung cấp",
+        error: getErrorMessage(error, "Không thể tải nhà cung cấp"),
       });
+    }
+  },
+
+  searchSuppliers: async (search) => {
+    try {
+      const { items } = await api.getSuppliers({
+        search: search.trim() ? search.trim() : null,
+        limit: SEARCH_LIMIT,
+        offset: 0,
+      });
+      return items;
+    } catch {
+      return [];
     }
   },
 
   createSupplier: async (input) => {
     try {
       const supplier = await api.createSupplier(input);
-      set({ suppliers: await api.getSuppliers() });
+      await get().fetchSuppliers();
       return supplier;
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể tạo nhà cung cấp",
+        error: getErrorMessage(error, "Không thể tạo nhà cung cấp"),
       });
       throw error;
     }
@@ -235,10 +376,10 @@ export const useInventoryStore = create<InventoryState>((set) => ({
   updateSupplier: async (input) => {
     try {
       await api.updateSupplier(input);
-      set({ suppliers: await api.getSuppliers() });
+      await get().fetchSuppliers();
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể cập nhật nhà cung cấp",
+        error: getErrorMessage(error, "Không thể cập nhật nhà cung cấp"),
       });
       throw error;
     }
@@ -247,124 +388,86 @@ export const useInventoryStore = create<InventoryState>((set) => ({
   deleteSupplier: async (id) => {
     try {
       await api.deleteSupplier(id);
-      set({ suppliers: await api.getSuppliers() });
+      await get().fetchSuppliers();
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể xóa nhà cung cấp",
+        error: getErrorMessage(error, "Không thể xóa nhà cung cấp"),
       });
       throw error;
     }
   },
 
-  fetchImportReceipts: async () => {
-    set({ loading: true, error: null });
+  fetchImportReceipts: async (opts) => {
+    const page = opts?.page ?? get().importReceiptsPage;
+    const search = opts?.search ?? get().importReceiptsSearch;
+    set({ loading: true, error: null, importReceiptsPage: page, importReceiptsSearch: search });
     try {
-      const importReceipts = await api.getImportReceipts();
-      set({ importReceipts, loading: false });
+      const { items, total } = await api.getImportReceipts(pageQuery(page, search));
+      set({ importReceipts: items, importReceiptsTotal: total, loading: false });
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tải phiếu nhập",
+        error: getErrorMessage(error, "Không thể tải phiếu nhập"),
       });
     }
   },
 
-  createImportReceipt: async (input) => {
+  createImportReceipt: async (input, opts) => {
     set({ loading: true, error: null });
     try {
       await api.createImportReceipt(input);
-      const [products, suppliers, importReceipts, dashboardStats, inventoryHistory] =
-        await Promise.all([
-          api.getProducts(),
-          api.getSuppliers(),
-          api.getImportReceipts(),
-          api.getDashboardStats(),
-          api.getInventoryHistory(),
-        ]);
-      set({
-        products,
-        suppliers,
-        importReceipts,
-        dashboardStats,
-        inventoryHistory,
-        loading: false,
-      });
+      if (opts?.refetch) await get().fetchImportReceipts();
+      set({ loading: false });
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tạo phiếu nhập",
+        error: getErrorMessage(error, "Không thể tạo phiếu nhập"),
       });
       throw error;
     }
   },
 
-  updateImportReceipt: async (input) => {
+  updateImportReceipt: async (input, opts) => {
     set({ loading: true, error: null });
     try {
       await api.updateImportReceipt(input);
-      const [products, suppliers, importReceipts, dashboardStats, inventoryHistory] =
-        await Promise.all([
-          api.getProducts(),
-          api.getSuppliers(),
-          api.getImportReceipts(),
-          api.getDashboardStats(),
-          api.getInventoryHistory(),
-        ]);
-      set({
-        products,
-        suppliers,
-        importReceipts,
-        dashboardStats,
-        inventoryHistory,
-        loading: false,
-      });
+      if (opts?.refetch) await get().fetchImportReceipts();
+      set({ loading: false });
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể sửa phiếu nhập",
+        error: getErrorMessage(error, "Không thể sửa phiếu nhập"),
       });
       throw error;
     }
   },
 
-  fetchExportReceipts: async () => {
-    set({ loading: true, error: null });
+  fetchExportReceipts: async (opts) => {
+    const page = opts?.page ?? get().exportReceiptsPage;
+    const search = opts?.search ?? get().exportReceiptsSearch;
+    set({ loading: true, error: null, exportReceiptsPage: page, exportReceiptsSearch: search });
     try {
-      const exportReceipts = await api.getExportReceipts();
-      set({ exportReceipts, loading: false });
+      const { items, total } = await api.getExportReceipts(pageQuery(page, search));
+      set({ exportReceipts: items, exportReceiptsTotal: total, loading: false });
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tải phiếu xuất",
+        error: getErrorMessage(error, "Không thể tải phiếu xuất"),
       });
     }
   },
 
-  createExportReceipt: async (input) => {
+  createExportReceipt: async (input, opts) => {
     set({ loading: true, error: null });
     try {
       const receipt = await api.createExportReceipt(input);
-      const [products, customers, exportReceipts, dashboardStats, inventoryHistory] =
-        await Promise.all([
-          api.getProducts(),
-          api.getCustomers(),
-          api.getExportReceipts(),
-          api.getDashboardStats(),
-          api.getInventoryHistory(),
-        ]);
-      set({
-        products,
-        customers,
-        exportReceipts,
-        dashboardStats,
-        inventoryHistory,
-        loading: false,
-      });
+      if (opts?.refetch) await get().fetchExportReceipts();
+      set({ loading: false });
       return receipt;
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tạo phiếu xuất",
+        error: getErrorMessage(error, "Không thể tạo phiếu xuất"),
       });
       throw error;
     }
@@ -379,7 +482,7 @@ export const useInventoryStore = create<InventoryState>((set) => ({
       set({
         dashboardStats: emptyStats,
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tải dashboard",
+        error: getErrorMessage(error, "Không thể tải dashboard"),
       });
     }
   },
@@ -402,7 +505,7 @@ export const useInventoryStore = create<InventoryState>((set) => ({
       set({
         loading: false,
         error:
-          error instanceof Error ? error.message : "Không thể tải báo cáo lợi nhuận",
+          getErrorMessage(error, "Không thể tải báo cáo lợi nhuận"),
       });
     }
   },

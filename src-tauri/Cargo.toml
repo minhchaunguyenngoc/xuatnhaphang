@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.2.1"
+version = "0.3.0"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -16,6 +16,22 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
+
+# Bản dev mặc định biên dịch cả SQLite (C bundled) ở opt-level 0 nên chậm hơn
+# bản release nhiều lần — lag khi chạy `tauri dev` phần lớn đến từ đây chứ
+# không phải từ code. Tối ưu các crate phụ thuộc ở mức cao nhất nhưng giữ crate
+# của mình ở mức 1 để vẫn biên dịch lại nhanh khi sửa code.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
 
 [dependencies]
 serde_json = "1.0"

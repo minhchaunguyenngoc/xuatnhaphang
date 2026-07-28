@@ -33,18 +33,68 @@ fn validate_receipt_header(receipt_number: &str, date: &str, item_count: usize) 
     Ok(())
 }
 
+/// Phiên bản schema, lưu trong `PRAGMA user_version`. Tăng số này khi thêm một
+/// bước backfill mới cần chạy lại trên CSDL đã có dữ liệu.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Cận cho tìm theo TIỀN TỐ: mọi chuỗi bắt đầu bằng `prefix` đều nằm trong nửa
+/// khoảng `[prefix, cận_trên)`.
+///
+/// Dùng so sánh khoảng (`col >= ?1 AND col < ?2`) thay cho `LIKE 'x%'` vì
+/// SQLite chỉ biến LIKE thành quét khoảng index khi bật `case_sensitive_like`
+/// — mà pragma đó lại làm hỏng tìm kiếm tên hàng hoá (gõ "may" không ra "May").
+/// So sánh khoảng thì luôn dùng được index, không phụ thuộc pragma nào, nên
+/// vừa giữ được tốc độ tìm số phiếu vừa trả lại tìm kiếm không phân biệt
+/// hoa/thường cho các bảng khác.
+fn prefix_upper_bound(prefix: &str) -> String {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    for i in (0..chars.len()).rev() {
+        if let Some(next) = char::from_u32(chars[i] as u32 + 1) {
+            chars.truncate(i + 1);
+            chars[i] = next;
+            return chars.into_iter().collect();
+        }
+    }
+    // Không ký tự nào tăng được (chuỗi rỗng) — lấy cận trên vô cùng.
+    format!("{prefix}\u{10FFFF}")
+}
+
 pub struct Database {
     pub conn: Mutex<Connection>,
 }
 
 impl Database {
+    /// Cấu hình kết nối, đặt chung một chỗ để bản chạy thật và bản test dùng
+    /// đúng cùng một thiết lập.
+    ///
+    /// - `WAL` + `synchronous = NORMAL`: mặc định (rollback journal +
+    ///   `synchronous = FULL`) bắt fsync nhiều lần cho mỗi lần lưu phiếu —
+    ///   đây là nguyên nhân chính khiến thao tác lưu bị khựng khi dữ liệu lớn.
+    /// - `cache_size = -65536`: 64MB cache trang (số âm = KB).
+    /// - `mmap_size`: đọc qua mmap 256MB, giảm số lần copy khi quét bảng lớn.
+    /// - `busy_timeout`: chờ thay vì lỗi ngay khi có lock (WAL cho phép đọc
+    ///   song song ghi, nhưng vẫn cần khi 2 lệnh ghi trùng nhau).
+    ///
+    /// KHÔNG bật `case_sensitive_like`: pragma đó làm tìm kiếm phân biệt
+    /// hoa/thường (gõ "may" không ra "May do duong huyet"). Tìm theo số phiếu
+    /// vẫn nhanh nhờ dùng so sánh khoảng thay cho LIKE — xem `prefix_range`.
+    const PRAGMAS: &'static str = "
+        PRAGMA foreign_keys = ON;
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA busy_timeout = 5000;
+        PRAGMA cache_size = -65536;
+        PRAGMA temp_store = MEMORY;
+        PRAGMA mmap_size = 268435456;
+    ";
+
     pub fn new(path: PathBuf) -> SqlResult<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
 
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        conn.execute_batch(Self::PRAGMAS)?;
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -229,21 +279,78 @@ impl Database {
         // Cho phép sửa phiếu nhập (khi lô chưa bị xuất đụng tới) — cần dấu thời
         // gian lần sửa cuối; phiếu cũ backfill = created_at.
         Self::add_column_if_missing(&conn, "import_receipts", "updated_at", "TEXT")?;
-        conn.execute(
-            "UPDATE import_receipts SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''",
-            [],
-        )?;
         // FIFO phải theo NGÀY PHIẾU, không theo thời điểm insert (Issue 8). Thêm
         // cột ngày nhập trên batch; batch cũ backfill = ngày tạo.
         Self::add_column_if_missing(&conn, "product_batches", "import_date", "TEXT")?;
-        conn.execute(
-            "UPDATE product_batches SET import_date = date(created_at) WHERE import_date IS NULL OR import_date = ''",
-            [],
-        )?;
-        Self::backfill_batches_for_existing_stock(&conn)?;
+
+        // 3 lệnh backfill dưới đây QUÉT VÀ GHI TOÀN BẢNG. Trước đây chúng chạy
+        // lại mỗi lần mở app — với dữ liệu lớn là vài giây đơ trước khi cửa sổ
+        // kịp hiện. Dùng `user_version` để chỉ chạy đúng một lần cho mỗi CSDL.
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version < SCHEMA_VERSION {
+            conn.execute(
+                "UPDATE import_receipts SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE product_batches SET import_date = date(created_at) WHERE import_date IS NULL OR import_date = ''",
+                [],
+            )?;
+            Self::backfill_batches_for_existing_stock(&conn)?;
+            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        }
+
         Self::bootstrap_default_admin(&conn)?;
+        Self::create_indexes(&conn)?;
 
         Ok(())
+    }
+
+    /// Index cho các cột hay lọc/join — không có thì mọi câu truy vấn phải
+    /// quét toàn bảng, chấp nhận được ở quy mô vài nghìn dòng nhưng chậm hẳn
+    /// khi dữ liệu lên tới hàng triệu dòng. `IF NOT EXISTS` nên chạy lại mỗi
+    /// lần mở app cũng an toàn, không tốn gì thêm với DB đã có index.
+    fn create_indexes(conn: &Connection) -> SqlResult<()> {
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_import_items_receipt_id ON import_items(receipt_id);
+            CREATE INDEX IF NOT EXISTS idx_import_items_product_id ON import_items(product_id);
+            CREATE INDEX IF NOT EXISTS idx_export_items_receipt_id ON export_items(receipt_id);
+            CREATE INDEX IF NOT EXISTS idx_export_items_product_id ON export_items(product_id);
+            CREATE INDEX IF NOT EXISTS idx_inventory_history_product_id ON inventory_history(product_id);
+            CREATE INDEX IF NOT EXISTS idx_inventory_history_created_at ON inventory_history(created_at);
+            CREATE INDEX IF NOT EXISTS idx_inventory_history_type_ref ON inventory_history(movement_type, reference_id);
+            CREATE INDEX IF NOT EXISTS idx_product_batches_product_id ON product_batches(product_id);
+            CREATE INDEX IF NOT EXISTS idx_product_batches_receipt_id ON product_batches(receipt_id);
+            CREATE INDEX IF NOT EXISTS idx_return_items_return_id ON return_items(return_id);
+            CREATE INDEX IF NOT EXISTS idx_return_items_original_item_id ON return_items(original_item_id);
+            CREATE INDEX IF NOT EXISTS idx_return_items_product_id ON return_items(product_id);
+            CREATE INDEX IF NOT EXISTS idx_return_receipts_date ON return_receipts(date);
+            CREATE INDEX IF NOT EXISTS idx_return_receipts_type ON return_receipts(return_type);
+            CREATE INDEX IF NOT EXISTS idx_import_receipts_date ON import_receipts(date);
+            CREATE INDEX IF NOT EXISTS idx_export_receipts_date ON export_receipts(date);
+            CREATE INDEX IF NOT EXISTS idx_export_receipts_customer_id ON export_receipts(customer_id);
+            CREATE INDEX IF NOT EXISTS idx_import_receipts_supplier_id ON import_receipts(supplier_id);
+
+            -- 3 danh sách chính đều ORDER BY name + LIMIT/OFFSET. Không có
+            -- index trên name thì mỗi lần lật trang phải quét toàn bảng rồi
+            -- dựng B-tree tạm để sắp xếp — càng lật sâu càng chậm.
+            CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+            CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
+            CREATE INDEX IF NOT EXISTS idx_suppliers_name ON suppliers(name);
+
+            -- Lịch sử kho sắp theo (created_at DESC, id DESC); index chỉ có
+            -- created_at nên phần so bằng id vẫn phải sắp xếp tạm.
+            CREATE INDEX IF NOT EXISTS idx_inventory_history_created_at_id ON inventory_history(created_at DESC, id DESC);
+
+            -- Vòng tiêu thụ FIFO chỉ quan tâm lô CÒN hàng, lấy theo ngày nhập.
+            -- Index riêng phần (partial) nên nhỏ và không phình theo lô đã hết.
+            CREATE INDEX IF NOT EXISTS idx_product_batches_fifo ON product_batches(product_id, import_date, id) WHERE remaining_quantity > 0;
+
+            -- Cảnh báo sắp hết hàng (dashboard + trang tồn kho).
+            CREATE INDEX IF NOT EXISTS idx_products_stock ON products(stock_quantity, min_stock);
+            ",
+        )
     }
 
     /// Nếu DB (mới hoặc vừa cập nhật từ bản chưa có đăng nhập) chưa có tài
@@ -387,15 +494,76 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_products(&self) -> SqlResult<Vec<Product>> {
+    /// Danh sách sản phẩm có tìm kiếm (mã/tên) + phân trang — dùng chung cho
+    /// cả bảng ở trang Hàng hoá lẫn ô tìm-chọn sản phẩm (POS, phiếu nhập):
+    /// trang danh sách gọi với limit/offset theo trang; ô tìm-chọn gọi với
+    /// limit nhỏ (vd. 50) và bỏ qua `total`.
+    pub fn get_products(&self, query: &ListQuery) -> SqlResult<PagedResult<Product>> {
+        let conn = self.conn.lock().unwrap();
+        let trimmed = query.search.as_deref().unwrap_or("").trim();
+        let has_search = !trimmed.is_empty();
+        let pattern = format!("%{trimmed}%");
+        let where_sql = if has_search {
+            "WHERE code LIKE ?1 OR name LIKE ?1"
+        } else {
+            ""
+        };
+
+        let total: i64 = if has_search {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM products {where_sql}"),
+                params![pattern],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM products", [], |row| row.get(0))?
+        };
+
+        let sql = format!(
+            "SELECT id, code, name, unit, import_price, export_price, stock_quantity, min_stock, category, description, created_at, updated_at
+             FROM products {where_sql} ORDER BY name ASC LIMIT ? OFFSET ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let map_row = |row: &rusqlite::Row| -> SqlResult<Product> {
+            Ok(Product {
+                id: row.get(0)?,
+                code: row.get(1)?,
+                name: row.get(2)?,
+                unit: row.get(3)?,
+                import_price: row.get(4)?,
+                export_price: row.get(5)?,
+                stock_quantity: row.get(6)?,
+                min_stock: row.get(7)?,
+                category: row.get(8)?,
+                description: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        };
+        let items = if has_search {
+            stmt.query_map(params![pattern, query.limit, query.offset], map_row)?
+                .collect::<SqlResult<Vec<_>>>()?
+        } else {
+            stmt.query_map(params![query.limit, query.offset], map_row)?
+                .collect::<SqlResult<Vec<_>>>()?
+        };
+
+        Ok(PagedResult { items, total })
+    }
+
+    /// Top N sản phẩm sắp hết hàng (tồn <= tồn tối thiểu), ưu tiên hàng thiếu
+    /// nhiều nhất — cho widget ở Tổng quan, không cần tải cả bảng sản phẩm.
+    pub fn get_low_stock_products(&self, limit: i64) -> SqlResult<Vec<Product>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, code, name, unit, import_price, export_price, stock_quantity, min_stock, category, description, created_at, updated_at
-             FROM products ORDER BY name ASC",
+             FROM products
+             WHERE stock_quantity <= min_stock
+             ORDER BY (min_stock - stock_quantity) DESC
+             LIMIT ?1",
         )?;
-
         let products = stmt
-            .query_map([], |row| {
+            .query_map(params![limit], |row| {
                 Ok(Product {
                     id: row.get(0)?,
                     code: row.get(1)?,
@@ -412,7 +580,6 @@ impl Database {
                 })
             })?
             .collect::<SqlResult<Vec<_>>>()?;
-
         Ok(products)
     }
 
@@ -547,7 +714,9 @@ impl Database {
         Ok(())
     }
 
-    fn get_product_by_id(&self, id: i64) -> SqlResult<Product> {
+    /// Tra 1 sản phẩm theo id — dùng để hồi phục sản phẩm đang chọn trong ô
+    /// tìm-chọn (vd. mở lại phiếu để sửa) mà không cần tải cả danh sách.
+    pub fn get_product_by_id(&self, id: i64) -> SqlResult<Product> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT id, code, name, unit, import_price, export_price, stock_quantity, min_stock, category, description, created_at, updated_at
@@ -572,16 +741,44 @@ impl Database {
         )
     }
 
-    pub fn get_customers(&self) -> SqlResult<Vec<Customer>> {
+    pub fn get_customers(&self, query: &ListQuery) -> SqlResult<PagedResult<Customer>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let trimmed = query.search.as_deref().unwrap_or("").trim();
+        let has_search = !trimmed.is_empty();
+        let pattern = format!("%{trimmed}%");
+        let where_sql = if has_search {
+            "WHERE code LIKE ?1 OR name LIKE ?1"
+        } else {
+            ""
+        };
+
+        let total: i64 = if has_search {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM customers {where_sql}"),
+                params![pattern],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM customers", [], |row| row.get(0))?
+        };
+
+        let sql = format!(
             "SELECT id, code, name, phone, address, note, debt, total_spent, created_at, updated_at
-             FROM customers ORDER BY name ASC",
-        )?;
-        let rows = stmt
-            .query_map([], Self::map_customer)?
-            .collect::<SqlResult<Vec<_>>>()?;
-        Ok(rows)
+             FROM customers {where_sql} ORDER BY name ASC LIMIT ? OFFSET ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let items = if has_search {
+            stmt.query_map(
+                params![pattern, query.limit, query.offset],
+                Self::map_customer,
+            )?
+            .collect::<SqlResult<Vec<_>>>()?
+        } else {
+            stmt.query_map(params![query.limit, query.offset], Self::map_customer)?
+                .collect::<SqlResult<Vec<_>>>()?
+        };
+
+        Ok(PagedResult { items, total })
     }
 
     fn map_customer(row: &rusqlite::Row) -> SqlResult<Customer> {
@@ -665,7 +862,8 @@ impl Database {
         Ok(())
     }
 
-    fn get_customer_by_id(&self, id: i64) -> SqlResult<Customer> {
+    /// Tra 1 khách hàng theo id — hồi phục khách đang chọn trong ô tìm-chọn.
+    pub fn get_customer_by_id(&self, id: i64) -> SqlResult<Customer> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT id, code, name, phone, address, note, debt, total_spent, created_at, updated_at
@@ -675,16 +873,44 @@ impl Database {
         )
     }
 
-    pub fn get_suppliers(&self) -> SqlResult<Vec<Supplier>> {
+    pub fn get_suppliers(&self, query: &ListQuery) -> SqlResult<PagedResult<Supplier>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let trimmed = query.search.as_deref().unwrap_or("").trim();
+        let has_search = !trimmed.is_empty();
+        let pattern = format!("%{trimmed}%");
+        let where_sql = if has_search {
+            "WHERE code LIKE ?1 OR name LIKE ?1"
+        } else {
+            ""
+        };
+
+        let total: i64 = if has_search {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM suppliers {where_sql}"),
+                params![pattern],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM suppliers", [], |row| row.get(0))?
+        };
+
+        let sql = format!(
             "SELECT id, code, name, phone, address, note, debt, total_purchased, created_at, updated_at
-             FROM suppliers ORDER BY name ASC",
-        )?;
-        let rows = stmt
-            .query_map([], Self::map_supplier)?
-            .collect::<SqlResult<Vec<_>>>()?;
-        Ok(rows)
+             FROM suppliers {where_sql} ORDER BY name ASC LIMIT ? OFFSET ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let items = if has_search {
+            stmt.query_map(
+                params![pattern, query.limit, query.offset],
+                Self::map_supplier,
+            )?
+            .collect::<SqlResult<Vec<_>>>()?
+        } else {
+            stmt.query_map(params![query.limit, query.offset], Self::map_supplier)?
+                .collect::<SqlResult<Vec<_>>>()?
+        };
+
+        Ok(PagedResult { items, total })
     }
 
     fn map_supplier(row: &rusqlite::Row) -> SqlResult<Supplier> {
@@ -757,7 +983,8 @@ impl Database {
         Ok(())
     }
 
-    fn get_supplier_by_id(&self, id: i64) -> SqlResult<Supplier> {
+    /// Tra 1 NCC theo id — hồi phục NCC đang chọn trong ô tìm-chọn.
+    pub fn get_supplier_by_id(&self, id: i64) -> SqlResult<Supplier> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT id, code, name, phone, address, note, debt, total_purchased, created_at, updated_at
@@ -862,42 +1089,79 @@ impl Database {
         self.get_import_receipt(receipt_id)
     }
 
-    pub fn get_import_receipts(&self) -> SqlResult<Vec<ImportReceipt>> {
+    /// Danh sách phiếu nhập có tìm kiếm (số phiếu/NCC) + phân trang. Vẫn giữ
+    /// nguyên tắc 1 query header + 1 query item rồi gom trong Rust để tránh
+    /// N+1 (Issue 17) — nhưng giờ query item chỉ lấy đúng các phiếu ĐÃ phân
+    /// trang (`WHERE receipt_id IN (...)`), không load toàn bộ `import_items`
+    /// như trước (sẽ không kham nổi khi bảng có hàng triệu dòng).
+    pub fn get_import_receipts(&self, query: &ListQuery) -> SqlResult<PagedResult<ImportReceipt>> {
         let conn = self.conn.lock().unwrap();
-        // 1 query lấy header, 1 query lấy toàn bộ item rồi gom theo receipt_id
-        // trong Rust — tránh N+1 (Issue 17).
-        let mut receipts: Vec<ImportReceipt> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, receipt_number, date, supplier, supplier_id, note, total_amount, created_at
-                 FROM import_receipts ORDER BY date DESC, id DESC",
-            )?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(ImportReceipt {
-                        id: row.get(0)?,
-                        receipt_number: row.get(1)?,
-                        date: row.get(2)?,
-                        supplier: row.get(3)?,
-                        supplier_id: row.get(4)?,
-                        note: row.get(5)?,
-                        total_amount: row.get(6)?,
-                        created_at: row.get(7)?,
-                        items: vec![],
-                    })
-                })?
-                .collect::<SqlResult<Vec<_>>>()?;
-            rows
+        let trimmed = query.search.as_deref().unwrap_or("").trim();
+        let has_search = !trimmed.is_empty();
+        // Tìm theo TIỀN TỐ số phiếu (không phải chứa-ở-giữa) để tận dụng được
+        // index UNIQUE có sẵn trên receipt_number — đo thực tế ở CSDL ~10GB,
+        // tìm "chứa" (LIKE '%x%') phải quét toàn bảng, mất tới ~21 giây/lần
+        // gõ; tìm theo tiền tố chỉ còn vài mili-giây. Số phiếu luôn được app
+        // sinh ra viết HOA nên viết hoa từ khoá trước khi so sánh.
+        let lo = trimmed.to_uppercase();
+        let hi = prefix_upper_bound(&lo);
+        let where_sql = if has_search {
+            "WHERE receipt_number >= ?1 AND receipt_number < ?2"
+        } else {
+            ""
         };
 
-        let mut items_by_receipt: HashMap<i64, Vec<ImportItem>> = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
+        let total: i64 = if has_search {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM import_receipts {where_sql}"),
+                params![lo, hi],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM import_receipts", [], |row| row.get(0))?
+        };
+
+        let sql = format!(
+            "SELECT id, receipt_number, date, supplier, supplier_id, note, total_amount, created_at
+             FROM import_receipts {where_sql} ORDER BY date DESC, id DESC LIMIT ? OFFSET ?"
+        );
+        let mut receipts: Vec<ImportReceipt> = {
+            let mut stmt = conn.prepare(&sql)?;
+            let map_row = |row: &rusqlite::Row| -> SqlResult<ImportReceipt> {
+                Ok(ImportReceipt {
+                    id: row.get(0)?,
+                    receipt_number: row.get(1)?,
+                    date: row.get(2)?,
+                    supplier: row.get(3)?,
+                    supplier_id: row.get(4)?,
+                    note: row.get(5)?,
+                    total_amount: row.get(6)?,
+                    created_at: row.get(7)?,
+                    items: vec![],
+                })
+            };
+            if has_search {
+                stmt.query_map(params![lo, hi, query.limit, query.offset], map_row)?
+                    .collect::<SqlResult<Vec<_>>>()?
+            } else {
+                stmt.query_map(params![query.limit, query.offset], map_row)?
+                    .collect::<SqlResult<Vec<_>>>()?
+            }
+        };
+
+        if !receipts.is_empty() {
+            let ids: Vec<i64> = receipts.iter().map(|r| r.id).collect();
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let items_sql = format!(
                 "SELECT ii.id, ii.receipt_id, ii.product_id, p.name, p.code, ii.quantity, ii.unit_price, ii.total_price
                  FROM import_items ii
                  JOIN products p ON p.id = ii.product_id
-                 ORDER BY ii.id ASC",
-            )?;
-            let rows = stmt.query_map([], |row| {
+                 WHERE ii.receipt_id IN ({placeholders})
+                 ORDER BY ii.id ASC"
+            );
+            let mut stmt = conn.prepare(&items_sql)?;
+            let mut items_by_receipt: HashMap<i64, Vec<ImportItem>> = HashMap::new();
+            let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
                 Ok(ImportItem {
                     id: row.get(0)?,
                     receipt_id: row.get(1)?,
@@ -916,14 +1180,17 @@ impl Database {
                     .or_default()
                     .push(item);
             }
-        }
-
-        for receipt in &mut receipts {
-            if let Some(items) = items_by_receipt.remove(&receipt.id) {
-                receipt.items = items;
+            for receipt in &mut receipts {
+                if let Some(items) = items_by_receipt.remove(&receipt.id) {
+                    receipt.items = items;
+                }
             }
         }
-        Ok(receipts)
+
+        Ok(PagedResult {
+            items: receipts,
+            total,
+        })
     }
 
     fn get_import_receipt(&self, id: i64) -> SqlResult<ImportReceipt> {
@@ -1158,6 +1425,17 @@ impl Database {
         if input.amount_paid < 0.0 {
             return Err(app_err("Số tiền thanh toán không được âm."));
         }
+        let items_total: f64 = input
+            .items
+            .iter()
+            .map(|item| item.quantity as f64 * item.unit_price)
+            .sum();
+        // Chiết khấu vượt tổng tiền hàng làm total_amount bị ép về 0 trong khi
+        // discount vẫn giữ giá trị gốc (lớn hơn) -> lệch giữa 2 giá trị này khiến
+        // báo cáo lợi nhuận và phiếu trả hàng tính sai (doanh thu/lợi nhuận ảo âm).
+        if input.discount > items_total {
+            return Err(app_err("Chiết khấu không được lớn hơn tổng tiền hàng."));
+        }
 
         let mut conn = self.conn.lock().unwrap();
 
@@ -1181,14 +1459,9 @@ impl Database {
         }
 
         let tx = conn.transaction()?;
-        let items_total: f64 = input
-            .items
-            .iter()
-            .map(|item| item.quantity as f64 * item.unit_price)
-            .sum();
-        // Chiết khấu ở mức đơn; tổng phải thu không âm.
-        let discount = input.discount.max(0.0);
-        let total_amount = (items_total - discount).max(0.0);
+        // Chiết khấu ở mức đơn; đã kiểm tra 0 <= discount <= items_total ở trên.
+        let discount = input.discount;
+        let total_amount = items_total - discount;
 
         // Nếu chọn khách từ danh bạ, lấy tên để lưu vào cột hiển thị `customer`.
         let customer_name: Option<String> = match input.customer_id {
@@ -1268,44 +1541,75 @@ impl Database {
         self.get_export_receipt(receipt_id)
     }
 
-    pub fn get_export_receipts(&self) -> SqlResult<Vec<ExportReceipt>> {
+    /// Xem ghi chú ở `get_import_receipts` — cùng nguyên tắc: phân trang
+    /// header trước, rồi chỉ load item của đúng các phiếu trong trang đó.
+    pub fn get_export_receipts(&self, query: &ListQuery) -> SqlResult<PagedResult<ExportReceipt>> {
         let conn = self.conn.lock().unwrap();
-        // 1 query header + 1 query item, gom trong Rust — tránh N+1 (Issue 17).
-        let mut receipts: Vec<ExportReceipt> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, receipt_number, date, customer, customer_id, discount, amount_paid, payment_method, note, total_amount, created_at
-                 FROM export_receipts ORDER BY date DESC, id DESC",
-            )?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(ExportReceipt {
-                        id: row.get(0)?,
-                        receipt_number: row.get(1)?,
-                        date: row.get(2)?,
-                        customer: row.get(3)?,
-                        customer_id: row.get(4)?,
-                        discount: row.get(5)?,
-                        amount_paid: row.get(6)?,
-                        payment_method: row.get(7)?,
-                        note: row.get(8)?,
-                        total_amount: row.get(9)?,
-                        created_at: row.get(10)?,
-                        items: vec![],
-                    })
-                })?
-                .collect::<SqlResult<Vec<_>>>()?;
-            rows
+        let trimmed = query.search.as_deref().unwrap_or("").trim();
+        let has_search = !trimmed.is_empty();
+        // Tìm theo tiền tố số phiếu — lý do xem ghi chú ở get_import_receipts.
+        let lo = trimmed.to_uppercase();
+        let hi = prefix_upper_bound(&lo);
+        let where_sql = if has_search {
+            "WHERE receipt_number >= ?1 AND receipt_number < ?2"
+        } else {
+            ""
         };
 
-        let mut items_by_receipt: HashMap<i64, Vec<ExportItem>> = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
+        let total: i64 = if has_search {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM export_receipts {where_sql}"),
+                params![lo, hi],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM export_receipts", [], |row| row.get(0))?
+        };
+
+        let sql = format!(
+            "SELECT id, receipt_number, date, customer, customer_id, discount, amount_paid, payment_method, note, total_amount, created_at
+             FROM export_receipts {where_sql} ORDER BY date DESC, id DESC LIMIT ? OFFSET ?"
+        );
+        let mut receipts: Vec<ExportReceipt> = {
+            let mut stmt = conn.prepare(&sql)?;
+            let map_row = |row: &rusqlite::Row| -> SqlResult<ExportReceipt> {
+                Ok(ExportReceipt {
+                    id: row.get(0)?,
+                    receipt_number: row.get(1)?,
+                    date: row.get(2)?,
+                    customer: row.get(3)?,
+                    customer_id: row.get(4)?,
+                    discount: row.get(5)?,
+                    amount_paid: row.get(6)?,
+                    payment_method: row.get(7)?,
+                    note: row.get(8)?,
+                    total_amount: row.get(9)?,
+                    created_at: row.get(10)?,
+                    items: vec![],
+                })
+            };
+            if has_search {
+                stmt.query_map(params![lo, hi, query.limit, query.offset], map_row)?
+                    .collect::<SqlResult<Vec<_>>>()?
+            } else {
+                stmt.query_map(params![query.limit, query.offset], map_row)?
+                    .collect::<SqlResult<Vec<_>>>()?
+            }
+        };
+
+        if !receipts.is_empty() {
+            let ids: Vec<i64> = receipts.iter().map(|r| r.id).collect();
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let items_sql = format!(
                 "SELECT ei.id, ei.receipt_id, ei.product_id, p.name, p.code, ei.quantity, ei.unit_price, ei.total_price, ei.cost_price
                  FROM export_items ei
                  JOIN products p ON p.id = ei.product_id
-                 ORDER BY ei.id ASC",
-            )?;
-            let rows = stmt.query_map([], |row| {
+                 WHERE ei.receipt_id IN ({placeholders})
+                 ORDER BY ei.id ASC"
+            );
+            let mut stmt = conn.prepare(&items_sql)?;
+            let mut items_by_receipt: HashMap<i64, Vec<ExportItem>> = HashMap::new();
+            let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
                 Ok(ExportItem {
                     id: row.get(0)?,
                     receipt_id: row.get(1)?,
@@ -1325,14 +1629,17 @@ impl Database {
                     .or_default()
                     .push(item);
             }
-        }
-
-        for receipt in &mut receipts {
-            if let Some(items) = items_by_receipt.remove(&receipt.id) {
-                receipt.items = items;
+            for receipt in &mut receipts {
+                if let Some(items) = items_by_receipt.remove(&receipt.id) {
+                    receipt.items = items;
+                }
             }
         }
-        Ok(receipts)
+
+        Ok(PagedResult {
+            items: receipts,
+            total,
+        })
     }
 
     fn get_export_receipt(&self, id: i64) -> SqlResult<ExportReceipt> {
@@ -1688,40 +1995,81 @@ impl Database {
         self.get_return_receipt(return_id)
     }
 
-    pub fn get_return_receipts(&self) -> SqlResult<Vec<ReturnReceipt>> {
+    /// Xem ghi chú ở `get_import_receipts` — cùng nguyên tắc phân trang +
+    /// chỉ load item của đúng trang. Kèm sẵn số phiếu gốc/tên đối tác qua
+    /// JOIN để trang Trả hàng không cần tải riêng import/export receipts.
+    pub fn get_return_receipts(&self, query: &ListQuery) -> SqlResult<PagedResult<ReturnReceipt>> {
         let conn = self.conn.lock().unwrap();
-        let mut receipts: Vec<ReturnReceipt> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, receipt_number, return_type, original_receipt_id, date, note, total_amount, created_at
-                 FROM return_receipts ORDER BY date DESC, id DESC",
-            )?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(ReturnReceipt {
-                        id: row.get(0)?,
-                        receipt_number: row.get(1)?,
-                        return_type: row.get(2)?,
-                        original_receipt_id: row.get(3)?,
-                        date: row.get(4)?,
-                        note: row.get(5)?,
-                        total_amount: row.get(6)?,
-                        created_at: row.get(7)?,
-                        items: vec![],
-                    })
-                })?
-                .collect::<SqlResult<Vec<_>>>()?;
-            rows
+        let trimmed = query.search.as_deref().unwrap_or("").trim();
+        let has_search = !trimmed.is_empty();
+        // Tìm theo tiền tố số phiếu — lý do xem ghi chú ở get_import_receipts.
+        let lo = trimmed.to_uppercase();
+        let hi = prefix_upper_bound(&lo);
+        let where_sql = if has_search {
+            "WHERE rr.receipt_number >= ?1 AND rr.receipt_number < ?2"
+        } else {
+            ""
         };
 
-        let mut items_by_return: HashMap<i64, Vec<ReturnItem>> = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
+        let total: i64 = if has_search {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM return_receipts rr {where_sql}"),
+                params![lo, hi],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM return_receipts", [], |row| row.get(0))?
+        };
+
+        let sql = format!(
+            "SELECT rr.id, rr.receipt_number, rr.return_type, rr.original_receipt_id, rr.date, rr.note, rr.total_amount, rr.created_at,
+                    CASE rr.return_type WHEN 'customer' THEN er.receipt_number WHEN 'supplier' THEN ir.receipt_number END,
+                    CASE rr.return_type WHEN 'customer' THEN er.customer WHEN 'supplier' THEN ir.supplier END
+             FROM return_receipts rr
+             LEFT JOIN export_receipts er ON rr.return_type = 'customer' AND er.id = rr.original_receipt_id
+             LEFT JOIN import_receipts ir ON rr.return_type = 'supplier' AND ir.id = rr.original_receipt_id
+             {where_sql}
+             ORDER BY rr.date DESC, rr.id DESC LIMIT ? OFFSET ?"
+        );
+        let mut receipts: Vec<ReturnReceipt> = {
+            let mut stmt = conn.prepare(&sql)?;
+            let map_row = |row: &rusqlite::Row| -> SqlResult<ReturnReceipt> {
+                Ok(ReturnReceipt {
+                    id: row.get(0)?,
+                    receipt_number: row.get(1)?,
+                    return_type: row.get(2)?,
+                    original_receipt_id: row.get(3)?,
+                    date: row.get(4)?,
+                    note: row.get(5)?,
+                    total_amount: row.get(6)?,
+                    created_at: row.get(7)?,
+                    items: vec![],
+                    original_receipt_number: row.get(8)?,
+                    partner_name: row.get(9)?,
+                })
+            };
+            if has_search {
+                stmt.query_map(params![lo, hi, query.limit, query.offset], map_row)?
+                    .collect::<SqlResult<Vec<_>>>()?
+            } else {
+                stmt.query_map(params![query.limit, query.offset], map_row)?
+                    .collect::<SqlResult<Vec<_>>>()?
+            }
+        };
+
+        if !receipts.is_empty() {
+            let ids: Vec<i64> = receipts.iter().map(|r| r.id).collect();
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let items_sql = format!(
                 "SELECT ri.id, ri.return_id, ri.original_item_id, ri.product_id, p.name, p.code, ri.quantity, ri.unit_price, ri.cost_price, ri.total_price
                  FROM return_items ri
                  JOIN products p ON p.id = ri.product_id
-                 ORDER BY ri.id ASC",
-            )?;
-            let rows = stmt.query_map([], |row| {
+                 WHERE ri.return_id IN ({placeholders})
+                 ORDER BY ri.id ASC"
+            );
+            let mut stmt = conn.prepare(&items_sql)?;
+            let mut items_by_return: HashMap<i64, Vec<ReturnItem>> = HashMap::new();
+            let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
                 Ok(ReturnItem {
                     id: row.get(0)?,
                     return_id: row.get(1)?,
@@ -1742,21 +2090,29 @@ impl Database {
                     .or_default()
                     .push(item);
             }
-        }
-
-        for receipt in &mut receipts {
-            if let Some(items) = items_by_return.remove(&receipt.id) {
-                receipt.items = items;
+            for receipt in &mut receipts {
+                if let Some(items) = items_by_return.remove(&receipt.id) {
+                    receipt.items = items;
+                }
             }
         }
-        Ok(receipts)
+
+        Ok(PagedResult {
+            items: receipts,
+            total,
+        })
     }
 
     fn get_return_receipt(&self, id: i64) -> SqlResult<ReturnReceipt> {
         let conn = self.conn.lock().unwrap();
         let receipt = conn.query_row(
-            "SELECT id, receipt_number, return_type, original_receipt_id, date, note, total_amount, created_at
-             FROM return_receipts WHERE id = ?1",
+            "SELECT rr.id, rr.receipt_number, rr.return_type, rr.original_receipt_id, rr.date, rr.note, rr.total_amount, rr.created_at,
+                    CASE rr.return_type WHEN 'customer' THEN er.receipt_number WHEN 'supplier' THEN ir.receipt_number END,
+                    CASE rr.return_type WHEN 'customer' THEN er.customer WHEN 'supplier' THEN ir.supplier END
+             FROM return_receipts rr
+             LEFT JOIN export_receipts er ON rr.return_type = 'customer' AND er.id = rr.original_receipt_id
+             LEFT JOIN import_receipts ir ON rr.return_type = 'supplier' AND ir.id = rr.original_receipt_id
+             WHERE rr.id = ?1",
             params![id],
             |row| {
                 Ok(ReturnReceipt {
@@ -1769,6 +2125,8 @@ impl Database {
                     total_amount: row.get(6)?,
                     created_at: row.get(7)?,
                     items: vec![],
+                    original_receipt_number: row.get(8)?,
+                    partner_name: row.get(9)?,
                 })
             },
         )?;
@@ -2052,48 +2410,71 @@ impl Database {
             [],
             |row| row.get(0),
         )?;
-        let import_total_month: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(total_amount), 0) FROM import_receipts WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')",
+        // Tính mốc đầu tháng này/đầu tháng sau MỘT LẦN rồi so sánh trực tiếp
+        // trên cột `date` (không bọc strftime() quanh cột) — bọc hàm quanh
+        // cột khiến SQLite phải quét toàn bảng dù đã có index ngày; đo thực
+        // tế ở CSDL ~10GB, cách cũ mất tới ~2.7 giây/lần tải Tổng quan, cách
+        // này chỉ còn vài chục mili-giây.
+        let month_start: String = conn.query_row(
+            "SELECT date('now', 'localtime', 'start of month')",
             [],
+            |row| row.get(0),
+        )?;
+        let next_month_start: String = conn.query_row(
+            "SELECT date('now', 'localtime', 'start of month', '+1 month')",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let import_total_month: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(total_amount), 0) FROM import_receipts WHERE date >= ?1 AND date < ?2",
+            params![month_start, next_month_start],
             |row| row.get(0),
         )?;
         // Trừ hàng khách trả trong tháng — đối xứng với cách phiếu bán cộng
         // doanh thu, để "Doanh thu tháng" không bị ảo cao hơn thực tế.
         let customer_return_total_month: f64 = conn.query_row(
             "SELECT COALESCE(SUM(rr.total_amount), 0) FROM return_receipts rr
-             WHERE rr.return_type = 'customer'
-               AND strftime('%Y-%m', rr.date) = strftime('%Y-%m', 'now', 'localtime')",
-            [],
+             WHERE rr.return_type = 'customer' AND rr.date >= ?1 AND rr.date < ?2",
+            params![month_start, next_month_start],
             |row| row.get(0),
         )?;
         let export_total_month: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(total_amount), 0) FROM export_receipts WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')",
-            [],
+            "SELECT COALESCE(SUM(total_amount), 0) FROM export_receipts WHERE date >= ?1 AND date < ?2",
+            params![month_start, next_month_start],
             |row| row.get(0),
         )?;
         let export_total_month = export_total_month - customer_return_total_month;
         // Lợi nhuận = (doanh thu dòng - giá vốn FIFO) - chiết khấu cấp phiếu (Issue 2+3)
         // - hàng khách trả (doanh thu trả - giá vốn hàng trả).
-        // Trừ discount MỘT lần/phiếu, không nhân theo số dòng.
+        // Chiết khấu = items_total - total_amount (đã bị ép về [0, items_total]
+        // khi tạo phiếu) thay vì cột discount thô, để tự "chữa lành" các phiếu cũ
+        // lỡ có discount > items_total và khớp công thức get_profit_report dùng.
         let profit_month: f64 = conn.query_row(
             "SELECT COALESCE((
                  SELECT SUM(ei.total_price - ei.quantity * ei.cost_price)
                  FROM export_items ei
                  JOIN export_receipts er ON er.id = ei.receipt_id
-                 WHERE strftime('%Y-%m', er.date) = strftime('%Y-%m', 'now', 'localtime')
+                 WHERE er.date >= ?1 AND er.date < ?2
              ), 0)
              - COALESCE((
-                 SELECT SUM(discount) FROM export_receipts
-                 WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+                 SELECT SUM(rt.items_total - er.total_amount)
+                 FROM export_receipts er
+                 JOIN (SELECT ei2.receipt_id, SUM(ei2.total_price) AS items_total
+                       FROM export_items ei2
+                       JOIN export_receipts er2 ON er2.id = ei2.receipt_id
+                       WHERE er2.date >= ?1 AND er2.date < ?2
+                       GROUP BY ei2.receipt_id) rt ON rt.receipt_id = er.id
+                 WHERE er.date >= ?1 AND er.date < ?2
              ), 0)
              - COALESCE((
                  SELECT SUM(ri.total_price - ri.quantity * ri.cost_price)
                  FROM return_items ri
                  JOIN return_receipts rr ON rr.id = ri.return_id
                  WHERE rr.return_type = 'customer'
-                   AND strftime('%Y-%m', rr.date) = strftime('%Y-%m', 'now', 'localtime')
+                   AND rr.date >= ?1 AND rr.date < ?2
              ), 0)",
-            [],
+            params![month_start, next_month_start],
             |row| row.get(0),
         )?;
 
@@ -2111,16 +2492,29 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         // Doanh thu từng SP đã trừ chiết khấu phiếu, phân bổ theo tỷ lệ
         // (line_total / tổng dòng của phiếu) — Issue 2+3.
+        //
+        // Subquery `rt` lọc theo cùng khoảng ngày TRƯỚC KHI gộp — nếu gộp
+        // toàn bộ export_items rồi mới lọc ngày ở ngoài (cách cũ), SQLite
+        // phải tính SUM cho MỌI phiếu trong lịch sử dù chỉ cần vài phiếu
+        // trong kỳ. Đo thực tế ở CSDL ~10GB: cách cũ mất ~7-8 giây, cách này
+        // chỉ còn dùng đúng index ngày, nhanh hơn nhiều bậc.
+        // Doanh thu tính từ total_amount (đã bị ép về [0, items_total] khi tạo
+        // phiếu) thay vì discount thô — cùng công thức create_customer_return
+        // dùng cho phiếu trả hàng, để 2 nơi luôn khớp nhau và tự "chữa lành"
+        // các phiếu cũ lỡ có discount > items_total trước khi có validation.
         let mut stmt = conn.prepare(
             "SELECT ei.product_id, p.code, p.name,
                     SUM(ei.quantity) AS qty,
-                    SUM(ei.total_price - COALESCE(er.discount * ei.total_price / NULLIF(rt.items_total, 0), 0)) AS revenue,
+                    SUM(COALESCE(ei.total_price * er.total_amount / NULLIF(rt.items_total, 0), ei.total_price)) AS revenue,
                     SUM(ei.quantity * ei.cost_price) AS cost
              FROM export_items ei
              JOIN export_receipts er ON er.id = ei.receipt_id
              JOIN products p ON p.id = ei.product_id
-             JOIN (SELECT receipt_id, SUM(total_price) AS items_total
-                   FROM export_items GROUP BY receipt_id) rt ON rt.receipt_id = ei.receipt_id
+             JOIN (SELECT ei2.receipt_id, SUM(ei2.total_price) AS items_total
+                   FROM export_items ei2
+                   JOIN export_receipts er2 ON er2.id = ei2.receipt_id
+                   WHERE er2.date BETWEEN ?1 AND ?2
+                   GROUP BY ei2.receipt_id) rt ON rt.receipt_id = ei.receipt_id
              WHERE er.date BETWEEN ?1 AND ?2
              GROUP BY ei.product_id, p.code, p.name",
         )?;
@@ -2296,13 +2690,63 @@ mod tests {
         /// DB in-memory cho test (schema đầy đủ như bản thật).
         fn new_memory() -> Self {
             let conn = Connection::open_in_memory().unwrap();
-            conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+            // Dùng đúng cấu hình như bản thật để test bắt được sai khác hành vi
+            // (nhất là chuyện phân biệt hoa/thường khi tìm kiếm).
+            conn.execute_batch(Self::PRAGMAS).unwrap();
             let db = Self {
                 conn: Mutex::new(conn),
             };
             db.init_schema().unwrap();
             db
         }
+    }
+
+    /// Test in-memory không kiểm được WAL (`:memory:` luôn ở chế độ "memory")
+    /// cũng như việc chặn migration bằng `user_version` khi mở lại cùng 1 file.
+    /// Test này dùng file thật để bắt 2 thứ đó.
+    #[test]
+    fn opens_file_db_with_wal_and_runs_migrations_once() {
+        let path = std::env::temp_dir().join(format!(
+            "xnh-test-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let db = Database::new(path.clone()).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let journal: String = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal.to_lowercase(), "wal", "phải bật WAL cho file DB");
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                version, SCHEMA_VERSION,
+                "phải đánh dấu đã chạy backfill xong"
+            );
+        }
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 5, 10.0);
+        drop(db);
+
+        // Mở lại: backfill không được chạy lại, dữ liệu còn nguyên.
+        let db2 = Database::new(path.clone()).unwrap();
+        assert_eq!(stock(&db2, p), 5, "dữ liệu phải còn nguyên sau khi mở lại");
+        {
+            let conn = db2.conn.lock().unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, SCHEMA_VERSION);
+        }
+        drop(db2);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 
     fn product(db: &Database, code: &str, export_price: f64) -> i64 {
@@ -2363,6 +2807,15 @@ mod tests {
     }
     fn avg_cost(db: &Database, pid: i64) -> f64 {
         db.get_product_by_id(pid).unwrap().import_price
+    }
+    /// ListQuery không lọc/không phân trang thật sự — đủ cho test không cần
+    /// kiểm tra riêng phần tìm kiếm/phân trang.
+    fn list_all() -> ListQuery {
+        ListQuery {
+            search: None,
+            limit: 1000,
+            offset: 0,
+        }
     }
 
     // Issue 5 + 8: FIFO theo ngày phiếu, giá vốn dòng đúng lô, giá vốn BQ tính lại.
@@ -2622,12 +3075,97 @@ mod tests {
         );
     }
 
+    // Chiết khấu > tổng tiền hàng làm total_amount bị ép về 0 trong khi cột
+    // discount vẫn giữ giá trị gốc lớn hơn — lệch giữa 2 giá trị khiến báo cáo
+    // lợi nhuận tính ra doanh thu/lợi nhuận ảo âm dù hàng đã bán hết đã trả hết.
+    #[test]
+    fn export_receipt_rejects_discount_exceeding_items_total() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        // items_total = 1 * 100 = 100; chiết khấu 500 vượt quá tổng tiền hàng.
+        let res = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            None,
+            500.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 1,
+                unit_price: 100.0,
+            }],
+        );
+        assert!(res.is_err(), "phải từ chối chiết khấu vượt tổng tiền hàng");
+        assert_eq!(stock(&db, p), 10, "tồn không đổi khi bị từ chối");
+    }
+
+    // Báo cáo lợi nhuận phải tự "chữa lành" cho các phiếu cũ (tạo trước khi có
+    // validation ở create_export_receipt) lỡ có discount > items_total: dùng
+    // total_amount (đã bị ép về 0 khi lưu) thay vì discount thô để tính doanh
+    // thu, nên bán hết rồi trả hết không được để lại doanh thu/lợi nhuận ảo.
+    #[test]
+    fn profit_report_no_phantom_revenue_for_legacy_oversized_discount() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-06-01", p, 10, 40.0);
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-06-15",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        // Mô phỏng dữ liệu cũ trước khi có validation: discount (700) lớn hơn
+        // items_total (500), total_amount đã bị code cũ ép về 0.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE export_receipts SET discount = 700.0, total_amount = 0.0 WHERE id = ?1",
+                params![sale.id],
+            )
+            .unwrap();
+        }
+        db.create_customer_return(CreateCustomerReturn {
+            receipt_number: "PT1".into(),
+            original_receipt_id: sale.id,
+            date: "2026-06-16".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: sale.items[0].id,
+                product_id: p,
+                quantity: 5,
+            }],
+        })
+        .unwrap();
+
+        let rep = db.get_profit_report("2026-06-01", "2026-06-30").unwrap();
+        assert!(
+            rep.total_revenue.abs() < 1e-9,
+            "doanh thu ảo sau bán hết rồi trả hết, thực tế {}",
+            rep.total_revenue
+        );
+        assert!(
+            rep.total_profit.abs() < 1e-9,
+            "lợi nhuận ảo sau bán hết rồi trả hết, thực tế {}",
+            rep.total_profit
+        );
+    }
+
     #[test]
     fn update_import_receipt_allowed_when_untouched() {
         let db = Database::new_memory();
         let p = product(&db, "P1", 100.0);
         import(&db, "PN1", "2026-01-01", p, 10, 10.0);
-        let receipt_id = db.get_import_receipts().unwrap()[0].id;
+        let receipt_id = db.get_import_receipts(&list_all()).unwrap().items[0].id;
 
         let updated = db
             .update_import_receipt(UpdateImportReceipt {
@@ -2652,7 +3190,7 @@ mod tests {
         let db = Database::new_memory();
         let p = product(&db, "P1", 100.0);
         import(&db, "PN1", "2026-01-01", p, 10, 10.0);
-        let receipt_id = db.get_import_receipts().unwrap()[0].id;
+        let receipt_id = db.get_import_receipts(&list_all()).unwrap().items[0].id;
         export_items(
             &db,
             "HD1",
@@ -2819,7 +3357,7 @@ mod tests {
         let db = Database::new_memory();
         let p = product(&db, "P1", 100.0);
         import(&db, "PN1", "2026-01-01", p, 10, 10.0);
-        let receipts = db.get_import_receipts().unwrap();
+        let receipts = db.get_import_receipts(&list_all()).unwrap().items;
         let receipt_id = receipts[0].id;
         let import_item_id = receipts[0].items[0].id;
         export_items(
@@ -2856,7 +3394,7 @@ mod tests {
         let db = Database::new_memory();
         let p = product(&db, "P1", 100.0);
         import(&db, "PN1", "2026-01-01", p, 10, 10.0);
-        let receipts = db.get_import_receipts().unwrap();
+        let receipts = db.get_import_receipts(&list_all()).unwrap().items;
         let receipt_id = receipts[0].id;
         let import_item_id = receipts[0].items[0].id;
 
@@ -2984,5 +3522,162 @@ mod tests {
             .filter(|h| h.movement_type == "export_price_change")
             .count();
         assert_eq!(before, after, "không đổi giá thì không ghi thêm marker");
+    }
+
+    #[test]
+    fn get_products_paginates_and_searches() {
+        let db = Database::new_memory();
+        product(&db, "AAA", 10.0);
+        product(&db, "BBB", 10.0);
+        product(&db, "CCC", 10.0);
+
+        let page1 = db
+            .get_products(&ListQuery {
+                search: None,
+                limit: 2,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            page1.total, 3,
+            "total phải đếm đúng toàn bộ, không theo trang"
+        );
+        assert_eq!(page1.items.len(), 2, "trang phải giới hạn đúng limit");
+
+        let page2 = db
+            .get_products(&ListQuery {
+                search: None,
+                limit: 2,
+                offset: 2,
+            })
+            .unwrap();
+        assert_eq!(page2.items.len(), 1, "trang cuối còn đúng 1 dòng");
+
+        let found = db
+            .get_products(&ListQuery {
+                search: Some("BB".into()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(found.total, 1);
+        assert_eq!(found.items[0].code, "BBB");
+    }
+
+    // `PRAGMA case_sensitive_like = ON` (thêm ở đợt tối ưu tốc độ trước) làm
+    // tìm kiếm phân biệt hoa/thường — gõ chữ thường không ra hàng hoá tên viết
+    // hoa. Đã bỏ pragma đó; test này khoá lại hành vi đúng.
+    #[test]
+    fn product_search_is_case_insensitive() {
+        let db = Database::new_memory();
+        db.create_product(CreateProduct {
+            code: "TBYT007".to_string(),
+            name: "May do duong huyet".to_string(),
+            unit: "cái".to_string(),
+            import_price: 0.0,
+            export_price: 100.0,
+            min_stock: 0,
+            category: None,
+            description: None,
+        })
+        .unwrap();
+
+        for term in ["may", "MAY", "May", "duong"] {
+            let found = db
+                .get_products(&ListQuery {
+                    search: Some(term.into()),
+                    limit: 10,
+                    offset: 0,
+                })
+                .unwrap();
+            assert_eq!(
+                found.total, 1,
+                "gõ \"{term}\" phải tìm ra \"May do duong huyet\""
+            );
+        }
+    }
+
+    // Tìm số phiếu dùng so sánh khoảng (>=, <) thay cho LIKE để vẫn dùng được
+    // index mà không cần bật case_sensitive_like.
+    #[test]
+    fn receipt_prefix_search_matches_only_that_prefix() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 10.0);
+        import(&db, "PN0001", "2026-01-01", p, 1, 10.0);
+        import(&db, "PN0002", "2026-01-02", p, 1, 10.0);
+        import(&db, "PX0001", "2026-01-03", p, 1, 10.0);
+
+        let found = db
+            .get_import_receipts(&ListQuery {
+                search: Some("pn000".into()), // gõ thường, số phiếu lưu HOA
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(found.total, 2, "chỉ 2 phiếu bắt đầu bằng PN000");
+        assert!(found
+            .items
+            .iter()
+            .all(|r| r.receipt_number.starts_with("PN")));
+
+        let exact = db
+            .get_import_receipts(&ListQuery {
+                search: Some("PN0002".into()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(exact.total, 1, "tiền tố đủ dài phải ra đúng 1 phiếu");
+        assert_eq!(exact.items[0].receipt_number, "PN0002");
+    }
+
+    #[test]
+    fn get_import_receipts_only_loads_items_for_current_page() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 10.0);
+        import(&db, "PN1", "2026-01-01", p, 1, 10.0);
+        import(&db, "PN2", "2026-01-02", p, 2, 10.0);
+
+        let page = db
+            .get_import_receipts(&ListQuery {
+                search: None,
+                limit: 1,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.len(), 1, "chỉ trả về 1 phiếu theo limit");
+        // Phiếu mới nhất (PN2, ngày 01-02) đứng đầu — phải có đúng dòng hàng
+        // của chính nó, không lẫn dòng của PN1 (đã ngoài trang).
+        assert_eq!(page.items[0].receipt_number, "PN2");
+        assert_eq!(page.items[0].items.len(), 1);
+        assert_eq!(page.items[0].items[0].quantity, 2);
+    }
+
+    #[test]
+    fn get_return_receipts_includes_original_receipt_and_partner_name() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let receipts = db.get_import_receipts(&list_all()).unwrap().items;
+        let receipt_id = receipts[0].id;
+        let import_item_id = receipts[0].items[0].id;
+
+        db.create_supplier_return(CreateSupplierReturn {
+            receipt_number: "PTN1".into(),
+            original_receipt_id: receipt_id,
+            date: "2026-01-02".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: import_item_id,
+                product_id: p,
+                quantity: 1,
+            }],
+        })
+        .unwrap();
+
+        let returns = db.get_return_receipts(&list_all()).unwrap().items;
+        assert_eq!(returns.len(), 1);
+        assert_eq!(returns[0].original_receipt_number.as_deref(), Some("PN1"));
     }
 }

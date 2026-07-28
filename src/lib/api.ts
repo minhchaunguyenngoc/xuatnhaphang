@@ -14,7 +14,9 @@ import type {
   ExportReceipt,
   ImportReceipt,
   InventoryHistory,
+  ListQuery,
   LoginInput,
+  PagedResult,
   Permission,
   Product,
   ProfitReport,
@@ -29,7 +31,11 @@ import type {
 } from "./types";
 
 export const api = {
-  getProducts: () => invoke<Product[]>("get_products"),
+  getProducts: (query: ListQuery) =>
+    invoke<PagedResult<Product>>("get_products", { query }),
+  getLowStockProducts: (limit: number) =>
+    invoke<Product[]>("get_low_stock_products", { limit }),
+  getProductById: (id: number) => invoke<Product>("get_product_by_id", { id }),
   createProduct: (input: CreateProduct) =>
     // Backend yêu cầu field `code` luôn có mặt (String, không phải Option) —
     // JSON.stringify tự bỏ key `undefined`, nên phải ép về "" để backend tự
@@ -38,27 +44,34 @@ export const api = {
   updateProduct: (input: UpdateProduct) =>
     invoke<Product>("update_product", { input }),
   deleteProduct: (id: number) => invoke<void>("delete_product", { id }),
-  getCustomers: () => invoke<Customer[]>("get_customers"),
+  getCustomers: (query: ListQuery) =>
+    invoke<PagedResult<Customer>>("get_customers", { query }),
+  getCustomerById: (id: number) => invoke<Customer>("get_customer_by_id", { id }),
   createCustomer: (input: CreateCustomer) =>
     invoke<Customer>("create_customer", { input }),
   updateCustomer: (input: UpdateCustomer) =>
     invoke<Customer>("update_customer", { input }),
   deleteCustomer: (id: number) => invoke<void>("delete_customer", { id }),
-  getSuppliers: () => invoke<Supplier[]>("get_suppliers"),
+  getSuppliers: (query: ListQuery) =>
+    invoke<PagedResult<Supplier>>("get_suppliers", { query }),
+  getSupplierById: (id: number) => invoke<Supplier>("get_supplier_by_id", { id }),
   createSupplier: (input: CreateSupplier) =>
     invoke<Supplier>("create_supplier", { input }),
   updateSupplier: (input: UpdateSupplier) =>
     invoke<Supplier>("update_supplier", { input }),
   deleteSupplier: (id: number) => invoke<void>("delete_supplier", { id }),
-  getImportReceipts: () => invoke<ImportReceipt[]>("get_import_receipts"),
+  getImportReceipts: (query: ListQuery) =>
+    invoke<PagedResult<ImportReceipt>>("get_import_receipts", { query }),
   createImportReceipt: (input: CreateImportReceipt) =>
     invoke<ImportReceipt>("create_import_receipt", { input }),
   updateImportReceipt: (input: UpdateImportReceipt) =>
     invoke<ImportReceipt>("update_import_receipt", { input }),
-  getExportReceipts: () => invoke<ExportReceipt[]>("get_export_receipts"),
+  getExportReceipts: (query: ListQuery) =>
+    invoke<PagedResult<ExportReceipt>>("get_export_receipts", { query }),
   createExportReceipt: (input: CreateExportReceipt) =>
     invoke<ExportReceipt>("create_export_receipt", { input }),
-  getReturnReceipts: () => invoke<ReturnReceipt[]>("get_return_receipts"),
+  getReturnReceipts: (query: ListQuery) =>
+    invoke<PagedResult<ReturnReceipt>>("get_return_receipts", { query }),
   createCustomerReturn: (input: CreateCustomerReturn) =>
     invoke<ReturnReceipt>("create_customer_return", { input }),
   createSupplierReturn: (input: CreateSupplierReturn) =>

@@ -1,5 +1,25 @@
 use serde::{Deserialize, Serialize};
 
+/// Tham số chung cho danh sách có tìm kiếm + phân trang — dùng cho mọi bảng
+/// có thể phình to (sản phẩm, khách hàng, NCC, phiếu nhập/xuất/trả hàng).
+/// Không phân trang thì các bảng này phải load hết mỗi lần gọi, chấp nhận
+/// được ở quy mô nhỏ nhưng treo hẳn khi dữ liệu lên tới hàng triệu dòng.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListQuery {
+    /// Không có/rỗng = không lọc.
+    pub search: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PagedResult<T> {
+    pub items: Vec<T>,
+    /// Tổng số dòng khớp điều kiện lọc (không tính limit/offset) — để tính
+    /// tổng số trang ở giao diện.
+    pub total: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Product {
     pub id: i64,
@@ -303,6 +323,13 @@ pub struct ReturnReceipt {
     pub total_amount: f64,
     pub created_at: String,
     pub items: Vec<ReturnItem>,
+    /// Số phiếu gốc (phiếu bán/phiếu nhập) — lấy sẵn từ backend để trang
+    /// Trả hàng không phải tải toàn bộ danh sách phiếu nhập/xuất chỉ để tra
+    /// cứu, tốn kém khi 2 bảng đó có hàng triệu dòng.
+    pub original_receipt_number: Option<String>,
+    /// Tên đối tác (khách hàng cho trả khách, nhà cung cấp cho trả NCC) —
+    /// cùng lý do như trên.
+    pub partner_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
