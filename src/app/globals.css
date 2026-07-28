@@ -130,29 +130,73 @@
 }
 
 @media print {
-  body * {
-    visibility: hidden;
+  /* Popup dialog có `transition: all .1s`. Khi chuyển sang kiểu in, các thuộc
+     tính bên dưới (vị trí, translate...) không đổi ngay mà CHẠY dần trong
+     100ms — trong khi trình duyệt chụp trang để in gần như tức thì, nên bắt
+     đúng lúc đang chạy dở: hoá đơn nằm lơ lửng giữa trang và cụt mất phần
+     đầu. Tắt hẳn mọi transition/animation khi in để trạng thái cuối có hiệu
+     lực ngay lập tức. */
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
   }
-  .invoice-print-area,
-  .invoice-print-area * {
-    visibility: visible;
-  }
-  .invoice-print-area {
-    /* `visibility: hidden` (khác `display: none`) vẫn giữ nguyên chỗ chiếm
-       layout của các phần tử ẩn — nếu trang nền (bảng dài, v.v.) đang cao thì
-       toàn bộ chiều cao vô hình đó vẫn đẩy vùng in xuống, tràn sang trang 2.
-       Phải dùng `position: absolute` để tách hẳn khỏi luồng layout và ghim
-       thẳng lên đầu trang in, không phụ thuộc nội dung ẩn phía trước nó. */
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-  }
-  /* Nền mờ phía sau dialog cũng phải bỏ hẳn khỏi luồng khi in, không chỉ ẩn
-     visibility — tránh mọi khả năng vẫn chiếm khoảng trống trang 1. */
-  [data-slot="dialog-overlay"] {
+
+  /* Ẩn HẲN (display:none) mọi nhánh DOM không liên quan tới hoá đơn, thay vì
+     `visibility: hidden` như trước. `visibility: hidden` vẫn giữ nguyên chỗ
+     chiếm layout, nên khi trang nền đang dài (bảng danh sách nhiều dòng) thì
+     toàn bộ chiều cao vô hình đó vẫn đẩy hoá đơn xuống dưới / sang trang 2.
+
+     `:has()` giữ lại đúng chuỗi tổ tiên của vùng in (kể cả lớp bọc portal của
+     dialog mà ta không kiểm soát tên), nên không phụ thuộc cấu trúc DOM nội
+     bộ của thư viện dialog. */
+  body
+    *:not(:has(.invoice-print-area)):not(.invoice-print-area):not(
+      .invoice-print-area *
+    ) {
     display: none !important;
   }
+
+  /* Popup dialog được căn giữa màn hình bằng `position: fixed` + `translate`.
+     Chỉ đặt lại `translate` về 0 là CHƯA đủ: giá trị `translate` khác `none`
+     vẫn tạo containing block cho con `position: absolute`, khiến vùng in bám
+     vào popup thay vì bám vào trang giấy. Phải trả về `none` hoàn toàn và đưa
+     popup về luồng tài liệu bình thường. */
+  [data-slot="dialog-content"] {
+    position: static !important;
+    inset: auto !important;
+    /* Ghi đè thẳng biến của Tailwind, KHÔNG chỉ dùng `translate: none`: bộ
+       minify CSS gộp translate/rotate/scale lại thành `transform` và làm rơi
+       mất `translate: none`, khiến popup vẫn bị dịch lên -50% chiều cao của
+       chính nó -> hoá đơn bị đẩy lên trên mép giấy và cụt mất phần đầu.
+       Biến CSS thì không bị gộp nên luôn ăn. */
+    --tw-translate-x: 0px !important;
+    --tw-translate-y: 0px !important;
+    translate: none !important;
+    filter: none !important;
+    animation: none !important;
+    width: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+
+  /* Vùng in nằm ở luồng bình thường (không `position: absolute`) để tự động
+     ngắt trang đúng khi hoá đơn dài hơn 1 trang. Mọi thứ phía trước đã bị
+     `display: none` nên nó luôn bắt đầu ở đầu trang 1. */
+  .invoice-print-area {
+    position: static !important;
+    width: 100% !important;
+    margin: 0 !important;
+  }
+
   .no-print {
     display: none !important;
   }

@@ -116,7 +116,11 @@ export function InvoicePrintDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl sm:max-w-3xl print:max-w-none print:rounded-none print:border-none print:p-0 print:shadow-none print:ring-0 print:!static print:!inset-auto print:!translate-x-0 print:!translate-y-0">
+      {/* Việc đưa popup về luồng bình thường khi in do `@media print` trong
+          globals.css lo trọn — không dùng utility `print:*` ở đây, vì
+          `print:!translate-x-0` chỉ đặt translate về 0 (khác `none`) nên vẫn
+          tạo containing block khiến hoá đơn không ghim được lên đầu trang. */}
+      <DialogContent className="max-w-3xl sm:max-w-3xl">
         {/* Khu vực chỉnh sửa thông tin khách — không in ra */}
         <div className="no-print space-y-2 rounded-lg border bg-muted/40 p-3">
           <p className="text-xs font-medium text-muted-foreground">
