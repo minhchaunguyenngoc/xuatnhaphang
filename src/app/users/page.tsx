@@ -26,6 +26,7 @@ import { UserFormDialog } from "@/components/users/user-form-dialog";
 import type { User } from "@/lib/types";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUsersStore } from "@/stores/users-store";
+import { getErrorMessage } from "@/lib/errors";
 
 export default function UsersPage() {
   const currentUser = useAuthStore((state) => state.user);
@@ -166,7 +167,7 @@ export default function UsersPage() {
             }
           } catch (error) {
             toast.error(
-              error instanceof Error ? error.message : "Không thể lưu người dùng",
+              getErrorMessage(error, "Không thể lưu người dùng"),
             );
             throw error;
           }
@@ -203,7 +204,7 @@ export default function UsersPage() {
                   setDeleteTarget(null);
                 } catch (error) {
                   toast.error(
-                    error instanceof Error ? error.message : "Không thể xóa người dùng",
+                    getErrorMessage(error, "Không thể xóa người dùng"),
                   );
                 } finally {
                   setDeleting(false);

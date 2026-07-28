@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import { api } from "@/lib/api";
 import type { LoginInput, User } from "@/lib/types";
+import { getErrorMessage } from "@/lib/errors";
 
 interface AuthState {
   user: User | null;
@@ -27,7 +28,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Đăng nhập thất bại",
+        error: getErrorMessage(error, "Đăng nhập thất bại"),
       });
       throw error;
     }

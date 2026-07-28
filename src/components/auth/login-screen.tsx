@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuthStore } from "@/stores/auth-store";
+import { getErrorMessage } from "@/lib/errors";
 
 export function LoginScreen() {
   const { login, loading } = useAuthStore();
@@ -20,7 +21,7 @@ export function LoginScreen() {
       await login({ username, password });
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Đăng nhập thất bại",
+        getErrorMessage(error, "Đăng nhập thất bại"),
       );
     }
   }

@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import { api } from "@/lib/api";
 import type { CreateUser, Permission, UpdateUser, User } from "@/lib/types";
+import { getErrorMessage } from "@/lib/errors";
 
 interface UsersState {
   users: User[];
@@ -29,7 +30,7 @@ export const useUsersStore = create<UsersState>((set) => ({
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : "Không thể tải người dùng",
+        error: getErrorMessage(error, "Không thể tải người dùng"),
       });
     }
   },
@@ -50,7 +51,7 @@ export const useUsersStore = create<UsersState>((set) => ({
       return user;
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể tạo người dùng",
+        error: getErrorMessage(error, "Không thể tạo người dùng"),
       });
       throw error;
     }
@@ -63,7 +64,7 @@ export const useUsersStore = create<UsersState>((set) => ({
       return user;
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể cập nhật người dùng",
+        error: getErrorMessage(error, "Không thể cập nhật người dùng"),
       });
       throw error;
     }
@@ -75,7 +76,7 @@ export const useUsersStore = create<UsersState>((set) => ({
       set({ users: await api.getUsers() });
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : "Không thể xóa người dùng",
+        error: getErrorMessage(error, "Không thể xóa người dùng"),
       });
       throw error;
     }

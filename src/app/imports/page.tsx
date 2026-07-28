@@ -3,12 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, FileUp, Pencil, Plus, Printer, Undo2 } from "lucide-react";
 import { toast } from "sonner";
+import { useShallow } from "zustand/react/shallow";
 
 import { InvoicePrintDialog } from "@/components/receipts/invoice-print-dialog";
 import { ReceiptFormDialog } from "@/components/receipts/receipt-form-dialog";
 import { ReturnFormDialog } from "@/components/receipts/return-form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
+import { Pagination } from "@/components/shared/pagination";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { api } from "@/lib/api";
 import {
   downloadImportTemplate,
   parseImportItemsFromExcel,
@@ -21,11 +25,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { formatCurrency, formatDate } from "@/lib/format";
 import type { ImportReceipt } from "@/lib/types";
 import { useAuthStore } from "@/stores/auth-store";
 import { useInventoryStore } from "@/stores/inventory-store";
 import { useReturnsStore } from "@/stores/returns-store";
+import { getErrorMessage } from "@/lib/errors";
 
 export default function ImportsPage() {
   const hasPermission = useAuthStore((state) => state.hasPermission);
@@ -33,23 +39,35 @@ export default function ImportsPage() {
   const canEdit = hasPermission("imports.edit");
   const canReturn = hasPermission("returns.supplier");
 
+  // useShallow: xem ghi chú ở trang Hoá đơn bán hàng.
   const {
     importReceipts,
-    products,
-    suppliers,
+    importReceiptsTotal,
+    importReceiptsPage,
     fetchImportReceipts,
-    fetchProducts,
-    fetchSuppliers,
-    fetchDashboard,
-    fetchInventoryHistory,
+    searchSuppliers,
     createImportReceipt,
     updateImportReceipt,
-  } = useInventoryStore();
+  } = useInventoryStore(
+    useShallow((s) => ({
+      importReceipts: s.importReceipts,
+      importReceiptsTotal: s.importReceiptsTotal,
+      importReceiptsPage: s.importReceiptsPage,
+      fetchImportReceipts: s.fetchImportReceipts,
+      searchSuppliers: s.searchSuppliers,
+      createImportReceipt: s.createImportReceipt,
+      updateImportReceipt: s.updateImportReceipt,
+    })),
+  );
   const { returnReceipts, fetchReturnReceipts, createSupplierReturn } =
     useReturnsStore();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<ImportReceipt | null>(null);
   const [printReceipt, setPrintReceipt] = useState<ImportReceipt | null>(null);
+  const [printPartner, setPrintPartner] = useState<{
+    phone: string | null;
+    address: string | null;
+  } | null>(null);
   const [returningReceipt, setReturningReceipt] = useState<ImportReceipt | null>(
     null,
   );
@@ -58,20 +76,31 @@ export default function ImportsPage() {
     { product_id: number; quantity: number; unit_price: number }[]
   >([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => {
-    void fetchImportReceipts();
-    void fetchProducts();
-    void fetchSuppliers();
     void fetchReturnReceipts();
-  }, [fetchImportReceipts, fetchProducts, fetchSuppliers, fetchReturnReceipts]);
+  }, [fetchReturnReceipts]);
+
+  useEffect(() => {
+    void fetchImportReceipts({ page: 1, search: debouncedSearch });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
 
   async function handleImportFile(file: File) {
     setImporting(true);
     try {
+      // Nạp tạm 1 lô lớn để đối chiếu mã Excel — chỉ khi bấm nút này, không
+      // tải liên tục vào state chung (khác với danh sách phân trang ở trên).
+      const { items: allProducts } = await api.getProducts({
+        search: null,
+        limit: 5000,
+        offset: 0,
+      });
       const { items, skipped, unknownCodes } = await parseImportItemsFromExcel(
         file,
-        products,
+        allProducts,
       );
       if (items.length === 0) {
         const reason =
@@ -120,7 +149,7 @@ export default function ImportsPage() {
             </Button>
             <Button
               variant="outline"
-              disabled={importing || products.length === 0}
+              disabled={importing}
               onClick={() => fileInputRef.current?.click()}
             >
               <FileUp className="mr-2 h-4 w-4" />
@@ -133,7 +162,6 @@ export default function ImportsPage() {
                   setExcelItems([]);
                   setDialogOpen(true);
                 }}
-                disabled={products.length === 0}
               >
                 <Plus className="mr-2 h-4 w-4" />
                 Tạo phiếu nhập
@@ -141,6 +169,13 @@ export default function ImportsPage() {
             ) : null}
           </div>
         }
+      />
+
+      <Input
+        placeholder="Tìm theo số phiếu (gõ từ đầu số phiếu)"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        className="mb-4 max-w-sm"
       />
 
       <div className="rounded-lg border bg-card">
@@ -212,7 +247,19 @@ export default function ImportsPage() {
                     <Button
                       size="icon"
                       variant="ghost"
-                      onClick={() => setPrintReceipt(receipt)}
+                      onClick={async () => {
+                        if (receipt.supplier_id) {
+                          try {
+                            const s = await api.getSupplierById(receipt.supplier_id);
+                            setPrintPartner({ phone: s.phone, address: s.address });
+                          } catch {
+                            setPrintPartner(null);
+                          }
+                        } else {
+                          setPrintPartner(null);
+                        }
+                        setPrintReceipt(receipt);
+                      }}
                     >
                       <Printer className="h-4 w-4" />
                     </Button>
@@ -223,6 +270,11 @@ export default function ImportsPage() {
           </TableBody>
         </Table>
       </div>
+      <Pagination
+        page={importReceiptsPage}
+        total={importReceiptsTotal}
+        onPageChange={(page) => void fetchImportReceipts({ page })}
+      />
 
       <InvoicePrintDialog
         open={!!printReceipt}
@@ -231,10 +283,7 @@ export default function ImportsPage() {
         }}
         type="import"
         receipt={printReceipt}
-        partner={(() => {
-          const s = suppliers.find((s) => s.id === printReceipt?.supplier_id);
-          return s ? { phone: s.phone, address: s.address } : null;
-        })()}
+        partner={printPartner}
       />
 
       <ReceiptFormDialog
@@ -247,40 +296,46 @@ export default function ImportsPage() {
           }
         }}
         type="import"
-        products={products}
-        partners={suppliers}
+        partnerSearch={searchSuppliers}
         initialItems={excelItems}
         editingReceipt={editing}
         onSubmit={async (values) => {
           try {
             if (editing) {
-              await updateImportReceipt({
-                id: editing.id,
-                date: values.date,
-                supplier: values.supplier,
-                supplier_id: values.partner_id ?? null,
-                note: values.note,
-                items: values.items,
-              });
+              await updateImportReceipt(
+                {
+                  id: editing.id,
+                  date: values.date,
+                  supplier: values.supplier,
+                  supplier_id: values.partner_id ?? null,
+                  note: values.note,
+                  items: values.items,
+                },
+                { refetch: true },
+              );
               toast.success("Đã cập nhật phiếu nhập");
             } else {
-              await createImportReceipt({
-                receipt_number: values.receipt_number,
-                date: values.date,
-                supplier: values.supplier,
-                supplier_id: values.partner_id ?? null,
-                note: values.note,
-                items: values.items,
-              });
+              await createImportReceipt(
+                {
+                  receipt_number: values.receipt_number,
+                  date: values.date,
+                  supplier: values.supplier,
+                  supplier_id: values.partner_id ?? null,
+                  note: values.note,
+                  items: values.items,
+                },
+                { refetch: true },
+              );
               toast.success("Đã tạo phiếu nhập");
             }
           } catch (error) {
             toast.error(
-              error instanceof Error
-                ? error.message
-                : editing
+              getErrorMessage(
+                error,
+                editing
                   ? "Không thể cập nhật phiếu nhập"
                   : "Không thể tạo phiếu nhập",
+              ),
             );
             throw error;
           }
@@ -298,12 +353,13 @@ export default function ImportsPage() {
         returnReceipts={returnReceipts}
         onSubmit={async (values) => {
           try {
+            // Xem ghi chú tương tự ở trang Hoá đơn bán hàng: trang này không
+            // hiển thị dashboard / lịch sử kho / nhà cung cấp nên bỏ hẳn.
             await createSupplierReturn(values);
-            await Promise.all([fetchDashboard(), fetchInventoryHistory(), fetchSuppliers()]);
             toast.success("Đã tạo phiếu trả hàng");
           } catch (error) {
             toast.error(
-              error instanceof Error ? error.message : "Không thể tạo phiếu trả hàng",
+              getErrorMessage(error, "Không thể tạo phiếu trả hàng"),
             );
             throw error;
           }
