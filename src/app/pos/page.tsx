@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Minus, Plus, Search, Trash2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
@@ -16,9 +17,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
+import { api } from "@/lib/api";
 import { formatCurrency, generateReceiptNumber, todayISO } from "@/lib/format";
-import type { ExportReceipt, PaymentMethod, Product } from "@/lib/types";
+import type { Customer, ExportReceipt, PaymentMethod, Product } from "@/lib/types";
 import { useInventoryStore } from "@/stores/inventory-store";
+import { getErrorMessage } from "@/lib/errors";
 
 interface CartItem {
   product_id: number;
@@ -34,43 +38,62 @@ const CUSTOMER_WALKIN = "0"; // khách lẻ (không lưu công nợ)
 
 export default function PosPage() {
   const {
-    products,
-    customers,
-    fetchProducts,
-    fetchCustomers,
+    searchProducts,
+    searchCustomers,
     createExportReceipt,
     createCustomer,
-  } = useInventoryStore();
+  } = useInventoryStore(
+    useShallow((s) => ({
+      searchProducts: s.searchProducts,
+      searchCustomers: s.searchCustomers,
+      createExportReceipt: s.createExportReceipt,
+      createCustomer: s.createCustomer,
+    })),
+  );
 
   const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 250);
+  const [searchResults, setSearchResults] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customerId, setCustomerId] = useState<string>(CUSTOMER_WALKIN);
+  // Danh bạ khách hàng để hiện trong Select — nạp 1 lô gợi ý ban đầu qua tìm
+  // kiếm phía server (rỗng = 50 khách gần nhất), không tải cả bảng khách.
+  const [customerOptions, setCustomerOptions] = useState<Customer[]>([]);
   const [discount, setDiscount] = useState(0);
   const [note, setNote] = useState("");
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [customerDialogOpen, setCustomerDialogOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [printReceipt, setPrintReceipt] = useState<ExportReceipt | null>(null);
+  const [printPartner, setPrintPartner] = useState<{
+    phone: string | null;
+    address: string | null;
+  } | null>(null);
 
   useEffect(() => {
-    void fetchProducts();
-    void fetchCustomers();
-  }, [fetchProducts, fetchCustomers]);
+    void searchCustomers("").then(setCustomerOptions);
+  }, [searchCustomers]);
 
-  const filteredProducts = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return products;
-    return products.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) || p.code.toLowerCase().includes(q),
-    );
-  }, [products, search]);
+  useEffect(() => {
+    let active = true;
+    void searchProducts(debouncedSearch).then((items) => {
+      if (active) setSearchResults(items);
+    });
+    return () => {
+      active = false;
+    };
+  }, [debouncedSearch, searchProducts]);
 
   const itemsTotal = cart.reduce(
     (sum, item) => sum + item.quantity * item.unit_price,
     0,
   );
-  const total = Math.max(itemsTotal - discount, 0);
+  // Chiết khấu không được vượt tổng tiền hàng. Trước đây ô nhập cho gõ số lớn
+  // hơn, màn hình vẫn hiện "Khách cần trả 0đ" nên trông như bình thường, nhưng
+  // giá trị vượt vẫn được lưu xuống DB và làm báo cáo lợi nhuận ra số âm ảo.
+  // Kẹp lại ở đây (giỏ hàng có thể đổi sau khi đã gõ chiết khấu).
+  const effectiveDiscount = Math.min(Math.max(discount, 0), itemsTotal);
+  const total = itemsTotal - effectiveDiscount;
 
   function addToCart(product: Product) {
     if (product.stock_quantity <= 0) {
@@ -137,7 +160,7 @@ export default function PosPage() {
         date: todayISO(),
         customer_id:
           customerId === CUSTOMER_WALKIN ? null : Number(customerId),
-        discount,
+        discount: effectiveDiscount,
         amount_paid: values.amount_paid,
         payment_method: values.payment_method,
         note: note || null,
@@ -151,9 +174,23 @@ export default function PosPage() {
       setPaymentOpen(false);
       resetSale();
       setPrintReceipt(receipt);
+      // Chỉ nạp lại đúng lưới sản phẩm đang hiển thị (1 lượt, tối đa 50 dòng)
+      // để số tồn hiện đúng sau khi bán — thay cho việc nạp lại products +
+      // customers + danh sách phiếu + lịch sử kho + dashboard như trước.
+      void searchProducts(debouncedSearch).then(setSearchResults);
+      if (receipt.customer_id) {
+        try {
+          const c = await api.getCustomerById(receipt.customer_id);
+          setPrintPartner({ phone: c.phone, address: c.address });
+        } catch {
+          setPrintPartner(null);
+        }
+      } else {
+        setPrintPartner(null);
+      }
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Không thể tạo hóa đơn",
+        getErrorMessage(error, "Không thể tạo hóa đơn"),
       );
     } finally {
       setSubmitting(false);
@@ -246,7 +283,7 @@ export default function PosPage() {
             <Select
               items={{
                 [CUSTOMER_WALKIN]: "Khách lẻ",
-                ...Object.fromEntries(customers.map((c) => [String(c.id), c.name])),
+                ...Object.fromEntries(customerOptions.map((c) => [String(c.id), c.name])),
               }}
               value={customerId}
               onValueChange={(v) => setCustomerId(v ?? CUSTOMER_WALKIN)}
@@ -256,7 +293,7 @@ export default function PosPage() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={CUSTOMER_WALKIN}>Khách lẻ</SelectItem>
-                {customers.map((c) => (
+                {customerOptions.map((c) => (
                   <SelectItem key={c.id} value={String(c.id)}>
                     {c.name}
                     {c.phone ? ` · ${c.phone}` : ""}
@@ -289,8 +326,13 @@ export default function PosPage() {
             <Input
               type="number"
               min={0}
+              max={itemsTotal}
               value={discount}
-              onChange={(e) => setDiscount(Number(e.target.value) || 0)}
+              onChange={(e) =>
+                setDiscount(
+                  Math.min(Math.max(Number(e.target.value) || 0, 0), itemsTotal),
+                )
+              }
               className="h-7 w-32 text-right"
             />
           </div>
@@ -324,13 +366,13 @@ export default function PosPage() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-3">
-          {filteredProducts.length === 0 ? (
+          {searchResults.length === 0 ? (
             <p className="p-8 text-center text-sm text-muted-foreground">
               Không tìm thấy sản phẩm.
             </p>
           ) : (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
-              {filteredProducts.map((product) => {
+              {searchResults.map((product) => {
                 const out = product.stock_quantity <= 0;
                 return (
                   <button
@@ -376,6 +418,7 @@ export default function PosPage() {
         onSubmit={async (values) => {
           try {
             const created = await createCustomer(values);
+            setCustomerOptions((prev) => [created, ...prev]);
             setCustomerId(String(created.id));
             toast.success("Đã thêm khách hàng");
           } catch {
@@ -392,10 +435,7 @@ export default function PosPage() {
         }}
         type="export"
         receipt={printReceipt}
-        partner={(() => {
-          const c = customers.find((c) => c.id === printReceipt?.customer_id);
-          return c ? { phone: c.phone, address: c.address } : null;
-        })()}
+        partner={printPartner}
       />
     </div>
   );
