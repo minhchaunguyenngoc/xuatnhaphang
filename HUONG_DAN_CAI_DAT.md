@@ -2,6 +2,15 @@
 
 Phần mềm quản lý Nhập – Xuất hàng, chạy hoàn toàn trên máy tính của bạn (không cần internet, không lưu dữ liệu lên đâu khác).
 
+## Có gì mới trong bản 0.3.0
+
+- **Sửa lỗi mất tên sản phẩm và nhà cung cấp khi mở phiếu để sửa** — trước đây các ô này hiện trống trơn dù phiếu vẫn lưu đúng, giờ hiện lại đầy đủ.
+- **Thông báo lỗi nói rõ lý do** — trước đây mọi lỗi đều hiện một câu chung chung (ví dụ "Không thể cập nhật phiếu nhập"), giờ hiện đúng nguyên nhân: *"Phiếu nhập đã có hàng được xuất, không thể sửa."*, *"Không đủ tồn kho cho sản phẩm X. Cần 5, còn 2."*, *"Chiết khấu không được lớn hơn tổng tiền hàng."*…
+- **Sửa lỗi tìm kiếm phân biệt chữ hoa/thường** — gõ chữ thường giờ vẫn tìm ra hàng hoá, khách hàng, nhà cung cấp có tên viết hoa.
+- **Sửa lỗi báo cáo ra lợi nhuận âm** — nguyên nhân là ô Chiết khấu cho nhập số lớn hơn tổng tiền hàng; giờ ô này bị chặn, và các phiếu đã lỡ nhập sai trước đây cũng được tính lại cho đúng mà không cần nhập lại.
+- **Sửa lỗi in phiếu không nằm đầu trang** — nội dung giờ luôn bắt đầu ngay đầu trang 1, phiếu dài thì tự sang trang bình thường.
+- **Chạy nhanh và mượt hơn** — thao tác nặng không còn làm đứng màn hình; lưu phiếu nhanh hơn; mở app nhanh hơn; danh sách dài và báo cáo nhiều dòng không còn giật.
+
 ## Có gì mới trong bản 0.2.1
 
 - **Sửa lỗi trả hàng tính sai giá trị khi đơn gốc có chiết khấu** — trước đây hoàn lại đúng giá niêm yết (nhiều hơn số khách thực trả), giờ trừ đúng phần đã bớt giá.
