@@ -2,6 +2,10 @@
 
 Phần mềm quản lý Nhập – Xuất hàng, chạy hoàn toàn trên máy tính của bạn (không cần internet, không lưu dữ liệu lên đâu khác).
 
+## Có gì mới trong bản 0.3.1
+
+- **Sửa và xoá được phiếu trả hàng** — trang Trả hàng giờ có thêm nút Sửa và Xoá cho từng phiếu (khách trả hàng lẫn trả nhà cung cấp), thêm 2 quyền riêng "Sửa phiếu trả hàng" / "Xoá phiếu trả hàng" ở trang Người dùng để cấp cho từng nhân viên. Sửa/xoá phiếu trả sẽ tự khôi phục đúng lại tồn kho và công nợ như trước khi trả — có kiểm tra chặn để không làm sai sổ sách nếu hàng vừa trả lại đã lỡ bán tiếp.
+
 ## Có gì mới trong bản 0.3.0
 
 - **Sửa lỗi mất tên sản phẩm và nhà cung cấp khi mở phiếu để sửa** — trước đây các ô này hiện trống trơn dù phiếu vẫn lưu đúng, giờ hiện lại đầy đủ.
