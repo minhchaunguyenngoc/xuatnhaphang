@@ -35,7 +35,7 @@ fn validate_receipt_header(receipt_number: &str, date: &str, item_count: usize) 
 
 /// Phiên bản schema, lưu trong `PRAGMA user_version`. Tăng số này khi thêm một
 /// bước backfill mới cần chạy lại trên CSDL đã có dữ liệu.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Cận cho tìm theo TIỀN TỐ: mọi chuỗi bắt đầu bằng `prefix` đều nằm trong nửa
 /// khoảng `[prefix, cận_trên)`.
@@ -283,6 +283,20 @@ impl Database {
         // cột ngày nhập trên batch; batch cũ backfill = ngày tạo.
         Self::add_column_if_missing(&conn, "product_batches", "import_date", "TEXT")?;
 
+        // Cần cho việc SỬA/XOÁ phiếu trả hàng khách: phiếu trả của khách tạo ra
+        // một lô hàng MỚI (không gắn phiếu nhập nào) nên trước đây không có
+        // đường nào lần ngược từ phiếu trả về đúng lô nó đã tạo.
+        Self::add_column_if_missing(&conn, "product_batches", "return_id", "INTEGER")?;
+        // Số tiền THỰC SỰ đã trừ vào nợ khách khi lập phiếu trả. Phải lưu lại vì
+        // phép trừ có kẹp sàn 0 (`MAX(debt - x, 0)`) nên không thể suy ngược:
+        // nợ 100, trả 300 thì nợ về 0 — lúc xoá phiếu mà cộng lại 300 sẽ sai.
+        Self::add_column_if_missing(
+            &conn,
+            "return_receipts",
+            "debt_applied",
+            "REAL NOT NULL DEFAULT 0",
+        )?;
+
         // 3 lệnh backfill dưới đây QUÉT VÀ GHI TOÀN BẢNG. Trước đây chúng chạy
         // lại mỗi lần mở app — với dữ liệu lớn là vài giây đơ trước khi cửa sổ
         // kịp hiện. Dùng `user_version` để chỉ chạy đúng một lần cho mỗi CSDL.
@@ -297,6 +311,7 @@ impl Database {
                 [],
             )?;
             Self::backfill_batches_for_existing_stock(&conn)?;
+            Self::backfill_return_reversal_columns(&conn)?;
             conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         }
 
@@ -418,6 +433,45 @@ impl Database {
              FROM products
              WHERE stock_quantity > 0
                AND id NOT IN (SELECT DISTINCT product_id FROM product_batches)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Gán ngược 2 cột mới (`product_batches.return_id`, `return_receipts.debt_applied`)
+    /// cho dữ liệu tạo trước khi có tính năng sửa/xoá phiếu trả hàng.
+    ///
+    /// - `return_id`: lô do phiếu trả khách tạo ra không gắn phiếu nhập nào
+    ///   (`receipt_id IS NULL`) nên phải dò theo bộ (sản phẩm, số lượng, giá vốn,
+    ///   ngày). Chỉ gán khi khớp đúng DUY NHẤT 1 lô để không gán nhầm; phiếu cũ
+    ///   không dò được thì lúc sửa/xoá sẽ báo lỗi rõ ràng thay vì làm sai tồn kho.
+    /// - `debt_applied`: không thể biết chính xác đã trừ nợ bao nhiêu, lấy bằng
+    ///   `total_amount` — đúng với trường hợp phổ biến (nợ khách lớn hơn giá trị
+    ///   trả nên không chạm sàn 0).
+    fn backfill_return_reversal_columns(conn: &Connection) -> SqlResult<()> {
+        conn.execute(
+            "UPDATE product_batches SET return_id = (
+                 SELECT rr.id FROM return_receipts rr
+                 JOIN return_items ri ON ri.return_id = rr.id
+                 WHERE rr.return_type = 'customer'
+                   AND ri.product_id = product_batches.product_id
+                   AND ri.quantity = product_batches.quantity
+                   AND ri.cost_price = product_batches.cost_price
+                   AND rr.date = product_batches.import_date
+             )
+             WHERE receipt_id IS NULL AND return_id IS NULL
+               AND (SELECT COUNT(*) FROM return_receipts rr
+                    JOIN return_items ri ON ri.return_id = rr.id
+                    WHERE rr.return_type = 'customer'
+                      AND ri.product_id = product_batches.product_id
+                      AND ri.quantity = product_batches.quantity
+                      AND ri.cost_price = product_batches.cost_price
+                      AND rr.date = product_batches.import_date) = 1",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE return_receipts SET debt_applied = total_amount
+             WHERE return_type = 'customer' AND debt_applied = 0",
             [],
         )?;
         Ok(())
@@ -1193,7 +1247,9 @@ impl Database {
         })
     }
 
-    fn get_import_receipt(&self, id: i64) -> SqlResult<ImportReceipt> {
+    /// Tra 1 phiếu nhập theo id kèm đủ dòng hàng — dùng khi trang Trả hàng cần
+    /// mở lại phiếu gốc để sửa/xoá phiếu trả mà không tải cả danh sách phiếu.
+    pub fn get_import_receipt(&self, id: i64) -> SqlResult<ImportReceipt> {
         let conn = self.conn.lock().unwrap();
         let receipt = conn.query_row(
             "SELECT id, receipt_number, date, supplier, supplier_id, note, total_amount, created_at
@@ -1642,7 +1698,8 @@ impl Database {
         })
     }
 
-    fn get_export_receipt(&self, id: i64) -> SqlResult<ExportReceipt> {
+    /// Xem ghi chú ở `get_import_receipt`.
+    pub fn get_export_receipt(&self, id: i64) -> SqlResult<ExportReceipt> {
         let conn = self.conn.lock().unwrap();
         let receipt = conn.query_row(
             "SELECT id, receipt_number, date, customer, customer_id, discount, amount_paid, payment_method, note, total_amount, created_at
@@ -1692,26 +1749,19 @@ impl Database {
         Ok(ExportReceipt { items, ..receipt })
     }
 
-    /// Khách trả hàng đã mua — BẮT BUỘC gắn với dòng hàng cụ thể trên phiếu
-    /// bán gốc, không vượt quá số đã bán (trừ các lần trả trước). Nhập lại
-    /// kho đúng giá vốn đã ghi trên dòng xuất gốc (`export_items.cost_price`),
-    /// không dùng giá vốn hiện tại hay giá tự nhập — khớp sổ sách.
-    pub fn create_customer_return(&self, input: CreateCustomerReturn) -> SqlResult<ReturnReceipt> {
-        if input.date.trim().is_empty() {
-            return Err(app_err("Ngày trả không được để trống."));
-        }
-        if input.items.is_empty() {
-            return Err(app_err("Phiếu trả phải có ít nhất 1 sản phẩm."));
-        }
-        for item in &input.items {
-            if item.quantity < 1 {
-                return Err(app_err("Số lượng trả phải >= 1."));
-            }
-        }
-
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-
+    /// Áp các dòng trả hàng KHÁCH vào kho/giá vốn/lịch sử cho một `return_id`
+    /// đã tồn tại sẵn (hàng của `return_receipts`) — dùng chung cho cả tạo mới
+    /// lẫn sửa (sửa gọi hàm này SAU KHI đã gỡ phiếu cũ + xoá `return_items` cũ
+    /// bằng `reverse_return_effects`, nên việc kiểm tra "không vượt quá đã
+    /// bán" ở đây luôn tính trên dữ liệu sạch, không đếm nhầm chính phiếu đang
+    /// sửa). Trả về `total_amount` để bên gọi ghi vào `return_receipts`.
+    fn apply_customer_return_lines(
+        tx: &rusqlite::Transaction,
+        return_id: i64,
+        original_receipt_id: i64,
+        date: &str,
+        items: &[ReturnItemInput],
+    ) -> SqlResult<f64> {
         // Chiết khấu của phiếu bán gốc phải được trừ vào giá trị trả hàng,
         // giống hệt cách get_profit_report phân bổ chiết khấu theo tỷ lệ dòng
         // (`ei.total_price / tổng dòng`) — nếu không, trả hàng sẽ hoàn lại
@@ -1719,12 +1769,12 @@ impl Database {
         // khách thực trả.
         let receipt_total: f64 = tx.query_row(
             "SELECT total_amount FROM export_receipts WHERE id = ?1",
-            params![input.original_receipt_id],
+            params![original_receipt_id],
             |row| row.get(0),
         )?;
         let items_total: f64 = tx.query_row(
             "SELECT COALESCE(SUM(total_price), 0) FROM export_items WHERE receipt_id = ?1",
-            params![input.original_receipt_id],
+            params![original_receipt_id],
             |row| row.get(0),
         )?;
         let discount_ratio = if items_total > 0.0 {
@@ -1740,8 +1790,8 @@ impl Database {
             unit_price: f64,
             cost_price: f64,
         }
-        let mut lines = Vec::with_capacity(input.items.len());
-        for item in &input.items {
+        let mut lines = Vec::with_capacity(items.len());
+        for item in items {
             let row: SqlResult<(i64, i64, f64, f64)> = tx.query_row(
                 "SELECT product_id, quantity, unit_price, cost_price FROM export_items WHERE id = ?1",
                 params![item.original_item_id],
@@ -1780,19 +1830,6 @@ impl Database {
 
         let total_amount: f64 = lines.iter().map(|l| l.quantity as f64 * l.unit_price).sum();
 
-        tx.execute(
-            "INSERT INTO return_receipts (receipt_number, return_type, original_receipt_id, date, note, total_amount)
-             VALUES (?1, 'customer', ?2, ?3, ?4, ?5)",
-            params![
-                input.receipt_number,
-                input.original_receipt_id,
-                input.date,
-                input.note,
-                total_amount
-            ],
-        )?;
-        let return_id = tx.last_insert_rowid();
-
         for line in &lines {
             let total_price = line.quantity as f64 * line.unit_price;
             tx.execute(
@@ -1810,17 +1847,18 @@ impl Database {
             )?;
 
             // Lô mới nhập lại kho, đúng giá vốn đã bán ra (không phải giá vốn
-            // bình quân hiện tại) — `receipt_id` để NULL vì không gắn phiếu nhập nào.
+            // bình quân hiện tại) — `receipt_id` để NULL vì không gắn phiếu nhập
+            // nào, thay vào đó gắn `return_id` để còn lần ngược được khi sửa/xoá.
             tx.execute(
-                "INSERT INTO product_batches (product_id, quantity, remaining_quantity, cost_price, import_date)
-                 VALUES (?1, ?2, ?2, ?3, ?4)",
-                params![line.product_id, line.quantity, line.cost_price, input.date],
+                "INSERT INTO product_batches (product_id, quantity, remaining_quantity, cost_price, import_date, return_id)
+                 VALUES (?1, ?2, ?2, ?3, ?4, ?5)",
+                params![line.product_id, line.quantity, line.cost_price, date, return_id],
             )?;
             tx.execute(
                 "UPDATE products SET stock_quantity = stock_quantity + ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
                 params![line.quantity, line.product_id],
             )?;
-            Self::recompute_avg_cost(&tx, line.product_id)?;
+            Self::recompute_avg_cost(tx, line.product_id)?;
             tx.execute(
                 "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
                  VALUES (?1, 'customer_return', ?2, ?3)",
@@ -1828,55 +1866,162 @@ impl Database {
             )?;
         }
 
-        // Trả hàng làm giảm cả công nợ lẫn doanh thu đã ghi nhận của khách,
-        // đối xứng với cách create_export_receipt cộng cả hai cùng lúc. Kẹp
-        // nợ về 0 — không theo dõi phần "khách được hoàn dư" (nhất quán với
-        // cách amount_paid dư không trừ nợ cũ ở phiếu bán).
+        Ok(total_amount)
+    }
+
+    /// Trừ nợ + doanh thu đã ghi nhận của khách theo `total_amount` của phiếu
+    /// trả, và ghi lại phần THỰC SỰ trừ được (`debt_applied`) — phép trừ có
+    /// kẹp sàn 0 nên không thể suy ngược lúc gỡ phiếu nếu không lưu lại.
+    fn apply_customer_return_debt(
+        tx: &rusqlite::Transaction,
+        return_id: i64,
+        original_receipt_id: i64,
+        total_amount: f64,
+    ) -> SqlResult<()> {
         let customer_id: Option<i64> = tx.query_row(
             "SELECT customer_id FROM export_receipts WHERE id = ?1",
-            params![input.original_receipt_id],
+            params![original_receipt_id],
             |row| row.get(0),
         )?;
-        if let Some(cid) = customer_id {
-            tx.execute(
-                "UPDATE customers SET debt = MAX(debt - ?1, 0), total_spent = total_spent - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
-                params![total_amount, cid],
-            )?;
+        let debt_applied = match customer_id {
+            Some(cid) => {
+                let debt_before: f64 = tx.query_row(
+                    "SELECT debt FROM customers WHERE id = ?1",
+                    params![cid],
+                    |row| row.get(0),
+                )?;
+                let applied = total_amount.min(debt_before.max(0.0));
+                tx.execute(
+                    "UPDATE customers SET debt = MAX(debt - ?1, 0), total_spent = total_spent - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                    params![total_amount, cid],
+                )?;
+                applied
+            }
+            None => 0.0,
+        };
+        tx.execute(
+            "UPDATE return_receipts SET debt_applied = ?1 WHERE id = ?2",
+            params![debt_applied, return_id],
+        )?;
+        Ok(())
+    }
+
+    fn validate_return_header(date: &str, items: &[ReturnItemInput]) -> SqlResult<()> {
+        if date.trim().is_empty() {
+            return Err(app_err("Ngày trả không được để trống."));
         }
+        if items.is_empty() {
+            return Err(app_err("Phiếu trả phải có ít nhất 1 sản phẩm."));
+        }
+        for item in items {
+            if item.quantity < 1 {
+                return Err(app_err("Số lượng trả phải >= 1."));
+            }
+        }
+        Ok(())
+    }
+
+    /// Khách trả hàng đã mua — BẮT BUỘC gắn với dòng hàng cụ thể trên phiếu
+    /// bán gốc, không vượt quá số đã bán (trừ các lần trả trước). Nhập lại
+    /// kho đúng giá vốn đã ghi trên dòng xuất gốc (`export_items.cost_price`),
+    /// không dùng giá vốn hiện tại hay giá tự nhập — khớp sổ sách.
+    pub fn create_customer_return(&self, input: CreateCustomerReturn) -> SqlResult<ReturnReceipt> {
+        Self::validate_return_header(&input.date, &input.items)?;
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO return_receipts (receipt_number, return_type, original_receipt_id, date, note, total_amount)
+             VALUES (?1, 'customer', ?2, ?3, ?4, 0)",
+            params![
+                input.receipt_number,
+                input.original_receipt_id,
+                input.date,
+                input.note
+            ],
+        )?;
+        let return_id = tx.last_insert_rowid();
+
+        let total_amount = Self::apply_customer_return_lines(
+            &tx,
+            return_id,
+            input.original_receipt_id,
+            &input.date,
+            &input.items,
+        )?;
+        tx.execute(
+            "UPDATE return_receipts SET total_amount = ?1 WHERE id = ?2",
+            params![total_amount, return_id],
+        )?;
+        Self::apply_customer_return_debt(&tx, return_id, input.original_receipt_id, total_amount)?;
 
         tx.commit()?;
         drop(conn);
         self.get_return_receipt(return_id)
     }
 
-    /// Trả hàng đã nhập cho nhà cung cấp — BẮT BUỘC gắn với dòng hàng cụ thể
-    /// trên phiếu nhập gốc. Khác với trả hàng khách: phải trừ đúng LÔ của
-    /// chính phiếu nhập đó (không phải FIFO chung), vì phải trả đúng lô đã
-    /// nhập — nếu lô đó đã bị bán bớt thì không đủ để trả.
-    pub fn create_supplier_return(&self, input: CreateSupplierReturn) -> SqlResult<ReturnReceipt> {
-        if input.date.trim().is_empty() {
-            return Err(app_err("Ngày trả không được để trống."));
-        }
-        if input.items.is_empty() {
-            return Err(app_err("Phiếu trả phải có ít nhất 1 sản phẩm."));
-        }
-        for item in &input.items {
-            if item.quantity < 1 {
-                return Err(app_err("Số lượng trả phải >= 1."));
-            }
-        }
+    /// Sửa phiếu trả hàng khách: gỡ TOÀN BỘ tác động cũ (kho/giá vốn/công nợ/
+    /// lịch sử) rồi áp lại theo dữ liệu mới, trong CÙNG một giao dịch — không
+    /// để lại trạng thái nửa vời nếu có lỗi giữa chừng. Không cho đổi phiếu
+    /// bán gốc, chỉ sửa số phiếu/ngày/ghi chú/số lượng từng dòng.
+    pub fn update_customer_return(&self, input: UpdateCustomerReturn) -> SqlResult<ReturnReceipt> {
+        Self::validate_return_header(&input.date, &input.items)?;
 
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
+        let return_type: String = tx.query_row(
+            "SELECT return_type FROM return_receipts WHERE id = ?1",
+            params![input.id],
+            |row| row.get(0),
+        )?;
+        if return_type != "customer" {
+            return Err(app_err("Phiếu trả này không phải phiếu trả hàng khách."));
+        }
+
+        let original_receipt_id = Self::reverse_return_effects(&tx, input.id)?;
+        tx.execute(
+            "DELETE FROM return_items WHERE return_id = ?1",
+            params![input.id],
+        )?;
+
+        let total_amount = Self::apply_customer_return_lines(
+            &tx,
+            input.id,
+            original_receipt_id,
+            &input.date,
+            &input.items,
+        )?;
+        tx.execute(
+            "UPDATE return_receipts SET receipt_number = ?1, date = ?2, note = ?3, total_amount = ?4 WHERE id = ?5",
+            params![input.receipt_number, input.date, input.note, total_amount, input.id],
+        )?;
+        Self::apply_customer_return_debt(&tx, input.id, original_receipt_id, total_amount)?;
+
+        tx.commit()?;
+        drop(conn);
+        self.get_return_receipt(input.id)
+    }
+
+    /// Áp các dòng trả hàng NHÀ CUNG CẤP vào kho/lịch sử cho một `return_id` đã
+    /// tồn tại — cùng nguyên tắc dùng chung cho tạo mới/sửa như
+    /// `apply_customer_return_lines`. Khác với trả hàng khách: phải trừ đúng
+    /// LÔ của chính phiếu nhập gốc (không phải FIFO chung).
+    fn apply_supplier_return_lines(
+        tx: &rusqlite::Transaction,
+        return_id: i64,
+        original_receipt_id: i64,
+        items: &[ReturnItemInput],
+    ) -> SqlResult<f64> {
         struct Line {
             original_item_id: i64,
             product_id: i64,
             quantity: i64,
             unit_price: f64,
         }
-        let mut lines = Vec::with_capacity(input.items.len());
-        for item in &input.items {
+        let mut lines = Vec::with_capacity(items.len());
+        for item in items {
             let row: SqlResult<(i64, i64, f64)> = tx.query_row(
                 "SELECT product_id, quantity, unit_price FROM import_items WHERE id = ?1",
                 params![item.original_item_id],
@@ -1905,7 +2050,7 @@ impl Database {
 
             let batch_row: SqlResult<(i64, i64)> = tx.query_row(
                 "SELECT id, remaining_quantity FROM product_batches WHERE receipt_id = ?1 AND product_id = ?2",
-                params![input.original_receipt_id, product_id],
+                params![original_receipt_id, product_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             );
             let (batch_id, batch_remaining) = match batch_row {
@@ -1935,19 +2080,6 @@ impl Database {
 
         let total_amount: f64 = lines.iter().map(|l| l.quantity as f64 * l.unit_price).sum();
 
-        tx.execute(
-            "INSERT INTO return_receipts (receipt_number, return_type, original_receipt_id, date, note, total_amount)
-             VALUES (?1, 'supplier', ?2, ?3, ?4, ?5)",
-            params![
-                input.receipt_number,
-                input.original_receipt_id,
-                input.date,
-                input.note,
-                total_amount
-            ],
-        )?;
-        let return_id = tx.last_insert_rowid();
-
         for line in &lines {
             let total_price = line.quantity as f64 * line.unit_price;
             tx.execute(
@@ -1967,7 +2099,7 @@ impl Database {
                 "UPDATE products SET stock_quantity = stock_quantity - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
                 params![line.quantity, line.product_id],
             )?;
-            Self::recompute_avg_cost(&tx, line.product_id)?;
+            Self::recompute_avg_cost(tx, line.product_id)?;
             tx.execute(
                 "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
                  VALUES (?1, 'supplier_return', ?2, ?3)",
@@ -1975,12 +2107,20 @@ impl Database {
             )?;
         }
 
-        // `suppliers.debt` không được ghi ở bất kỳ đâu khác trong hệ thống
-        // (luôn = 0, chưa có cơ chế mua chịu NCC) nên không đụng vào — chỉ
-        // điều chỉnh total_purchased cho đúng thực tế đã mua.
+        Ok(total_amount)
+    }
+
+    /// `suppliers.debt` không được ghi ở bất kỳ đâu khác trong hệ thống (luôn
+    /// = 0, chưa có cơ chế mua chịu NCC) nên không đụng vào — chỉ điều chỉnh
+    /// `total_purchased` cho đúng thực tế đã mua.
+    fn apply_supplier_return_purchased(
+        tx: &rusqlite::Transaction,
+        original_receipt_id: i64,
+        total_amount: f64,
+    ) -> SqlResult<()> {
         let supplier_id: Option<i64> = tx.query_row(
             "SELECT supplier_id FROM import_receipts WHERE id = ?1",
-            params![input.original_receipt_id],
+            params![original_receipt_id],
             |row| row.get(0),
         )?;
         if let Some(sid) = supplier_id {
@@ -1989,10 +2129,220 @@ impl Database {
                 params![total_amount, sid],
             )?;
         }
+        Ok(())
+    }
+
+    /// Trả hàng đã nhập cho nhà cung cấp — BẮT BUỘC gắn với dòng hàng cụ thể
+    /// trên phiếu nhập gốc. Khác với trả hàng khách: phải trừ đúng LÔ của
+    /// chính phiếu nhập đó (không phải FIFO chung), vì phải trả đúng lô đã
+    /// nhập — nếu lô đó đã bị bán bớt thì không đủ để trả.
+    pub fn create_supplier_return(&self, input: CreateSupplierReturn) -> SqlResult<ReturnReceipt> {
+        Self::validate_return_header(&input.date, &input.items)?;
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO return_receipts (receipt_number, return_type, original_receipt_id, date, note, total_amount)
+             VALUES (?1, 'supplier', ?2, ?3, ?4, 0)",
+            params![
+                input.receipt_number,
+                input.original_receipt_id,
+                input.date,
+                input.note
+            ],
+        )?;
+        let return_id = tx.last_insert_rowid();
+
+        let total_amount = Self::apply_supplier_return_lines(
+            &tx,
+            return_id,
+            input.original_receipt_id,
+            &input.items,
+        )?;
+        tx.execute(
+            "UPDATE return_receipts SET total_amount = ?1 WHERE id = ?2",
+            params![total_amount, return_id],
+        )?;
+        Self::apply_supplier_return_purchased(&tx, input.original_receipt_id, total_amount)?;
 
         tx.commit()?;
         drop(conn);
         self.get_return_receipt(return_id)
+    }
+
+    /// Sửa phiếu trả hàng nhà cung cấp — cùng nguyên tắc gỡ-rồi-áp-lại trong
+    /// 1 giao dịch như `update_customer_return`. Không cho đổi phiếu nhập gốc.
+    pub fn update_supplier_return(&self, input: UpdateSupplierReturn) -> SqlResult<ReturnReceipt> {
+        Self::validate_return_header(&input.date, &input.items)?;
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let return_type: String = tx.query_row(
+            "SELECT return_type FROM return_receipts WHERE id = ?1",
+            params![input.id],
+            |row| row.get(0),
+        )?;
+        if return_type != "supplier" {
+            return Err(app_err(
+                "Phiếu trả này không phải phiếu trả hàng nhà cung cấp.",
+            ));
+        }
+
+        let original_receipt_id = Self::reverse_return_effects(&tx, input.id)?;
+        tx.execute(
+            "DELETE FROM return_items WHERE return_id = ?1",
+            params![input.id],
+        )?;
+
+        let total_amount =
+            Self::apply_supplier_return_lines(&tx, input.id, original_receipt_id, &input.items)?;
+        tx.execute(
+            "UPDATE return_receipts SET receipt_number = ?1, date = ?2, note = ?3, total_amount = ?4 WHERE id = ?5",
+            params![input.receipt_number, input.date, input.note, total_amount, input.id],
+        )?;
+        Self::apply_supplier_return_purchased(&tx, original_receipt_id, total_amount)?;
+
+        tx.commit()?;
+        drop(conn);
+        self.get_return_receipt(input.id)
+    }
+
+    /// Gỡ TOÀN BỘ tác động của một phiếu trả hàng khỏi kho, giá vốn và công nợ —
+    /// dùng chung cho cả xoá phiếu lẫn sửa phiếu (sửa = gỡ rồi áp lại).
+    ///
+    /// Chỉ gỡ, KHÔNG xoá dòng `return_items`/`return_receipts` (bên gọi tự
+    /// quyết). Trả về `original_receipt_id` để bên sửa dùng lại.
+    ///
+    /// Chặn khi không thể gỡ an toàn:
+    /// - Phiếu trả của khách: lô hàng nó nhập lại kho mà đã bị bán bớt thì gỡ ra
+    ///   sẽ làm âm tồn và sai giá vốn các phiếu bán sau đó.
+    /// - Phiếu trả NCC: lô gốc của phiếu nhập không còn (phiếu nhập đã bị sửa).
+    fn reverse_return_effects(tx: &rusqlite::Transaction, return_id: i64) -> SqlResult<i64> {
+        let (return_type, original_receipt_id, total_amount, debt_applied): (
+            String,
+            i64,
+            f64,
+            f64,
+        ) = tx.query_row(
+            "SELECT return_type, original_receipt_id, total_amount, debt_applied
+             FROM return_receipts WHERE id = ?1",
+            params![return_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+
+        let items: Vec<(i64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT product_id, quantity FROM return_items WHERE return_id = ?1 ORDER BY id",
+            )?;
+            let rows = stmt
+                .query_map(params![return_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<SqlResult<Vec<_>>>()?;
+            rows
+        };
+
+        if return_type == "customer" {
+            for (product_id, quantity) in &items {
+                let batch: SqlResult<(i64, i64, i64)> = tx.query_row(
+                    "SELECT id, quantity, remaining_quantity FROM product_batches
+                     WHERE return_id = ?1 AND product_id = ?2",
+                    params![return_id, product_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                );
+                let (batch_id, batch_quantity, batch_remaining) = match batch {
+                    Ok(v) => v,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        return Err(app_err(
+                            "Không tìm thấy lô hàng do phiếu trả này tạo ra (phiếu trả quá cũ), không thể sửa/xoá.",
+                        ))
+                    }
+                    Err(e) => return Err(e),
+                };
+                if batch_remaining < batch_quantity {
+                    return Err(app_err(
+                        "Hàng của phiếu trả này đã được bán lại, không thể sửa/xoá.",
+                    ));
+                }
+                tx.execute(
+                    "DELETE FROM product_batches WHERE id = ?1",
+                    params![batch_id],
+                )?;
+                tx.execute(
+                    "UPDATE products SET stock_quantity = stock_quantity - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                    params![quantity, product_id],
+                )?;
+                Self::recompute_avg_cost(tx, *product_id)?;
+            }
+
+            let customer_id: Option<i64> = tx.query_row(
+                "SELECT customer_id FROM export_receipts WHERE id = ?1",
+                params![original_receipt_id],
+                |row| row.get(0),
+            )?;
+            if let Some(cid) = customer_id {
+                tx.execute(
+                    "UPDATE customers SET debt = debt + ?1, total_spent = total_spent + ?2, updated_at = datetime('now', 'localtime') WHERE id = ?3",
+                    params![debt_applied, total_amount, cid],
+                )?;
+            }
+        } else {
+            for (product_id, quantity) in &items {
+                let batch_id: SqlResult<i64> = tx.query_row(
+                    "SELECT id FROM product_batches WHERE receipt_id = ?1 AND product_id = ?2",
+                    params![original_receipt_id, product_id],
+                    |row| row.get(0),
+                );
+                let batch_id = match batch_id {
+                    Ok(v) => v,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => return Err(app_err(
+                        "Không tìm thấy lô hàng gốc của phiếu nhập, không thể sửa/xoá phiếu trả.",
+                    )),
+                    Err(e) => return Err(e),
+                };
+                tx.execute(
+                    "UPDATE product_batches SET remaining_quantity = remaining_quantity + ?1 WHERE id = ?2",
+                    params![quantity, batch_id],
+                )?;
+                tx.execute(
+                    "UPDATE products SET stock_quantity = stock_quantity + ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                    params![quantity, product_id],
+                )?;
+                Self::recompute_avg_cost(tx, *product_id)?;
+            }
+
+            let supplier_id: Option<i64> = tx.query_row(
+                "SELECT supplier_id FROM import_receipts WHERE id = ?1",
+                params![original_receipt_id],
+                |row| row.get(0),
+            )?;
+            if let Some(sid) = supplier_id {
+                tx.execute(
+                    "UPDATE suppliers SET total_purchased = total_purchased + ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                    params![total_amount, sid],
+                )?;
+            }
+        }
+
+        tx.execute(
+            "DELETE FROM inventory_history WHERE movement_type IN ('customer_return', 'supplier_return') AND reference_id = ?1",
+            params![return_id],
+        )?;
+
+        Ok(original_receipt_id)
+    }
+
+    /// Xoá hẳn một phiếu trả hàng và gỡ mọi tác động của nó khỏi kho/công nợ.
+    pub fn delete_return_receipt(&self, id: i64) -> SqlResult<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        Self::reverse_return_effects(&tx, id)?;
+        // `return_items` có ON DELETE CASCADE, nhưng xoá tường minh cho chắc —
+        // cascade chỉ chạy khi PRAGMA foreign_keys đang bật.
+        tx.execute("DELETE FROM return_items WHERE return_id = ?1", params![id])?;
+        tx.execute("DELETE FROM return_receipts WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Xem ghi chú ở `get_import_receipts` — cùng nguyên tắc phân trang +
@@ -3411,6 +3761,261 @@ mod tests {
         })
         .unwrap();
         assert_eq!(stock(&db, p), 7);
+    }
+
+    #[test]
+    fn delete_customer_return_reverses_stock_and_debt() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 10,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        assert_eq!(stock(&db, p), 0);
+        assert!((db.get_customer_by_id(c).unwrap().debt - 1000.0).abs() < 1e-9);
+
+        let ret = db
+            .create_customer_return(CreateCustomerReturn {
+                receipt_number: "PT1".into(),
+                original_receipt_id: sale.id,
+                date: "2026-01-03".into(),
+                note: None,
+                items: vec![ReturnItemInput {
+                    original_item_id: sale.items[0].id,
+                    product_id: p,
+                    quantity: 4,
+                }],
+            })
+            .unwrap();
+        assert_eq!(stock(&db, p), 4);
+        assert!((db.get_customer_by_id(c).unwrap().debt - 600.0).abs() < 1e-9);
+
+        db.delete_return_receipt(ret.id).unwrap();
+        assert_eq!(stock(&db, p), 0, "xoá phiếu trả phải trừ lại đúng tồn kho");
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 1000.0).abs() < 1e-9,
+            "xoá phiếu trả phải cộng lại đúng nợ đã trừ"
+        );
+        assert_eq!(
+            db.get_return_receipts(&list_all()).unwrap().total,
+            0,
+            "phiếu trả phải biến mất khỏi danh sách"
+        );
+        // return_receipts/export_receipts đánh số độc lập nên ret.id có thể
+        // trùng số với sale.id — phải lọc đúng movement_type mới so được.
+        let history = db.get_inventory_history().unwrap();
+        assert!(
+            !history
+                .iter()
+                .any(|h| h.movement_type == "customer_return" && h.reference_id == ret.id),
+            "lịch sử kho của phiếu trả đã xoá phải biến mất theo"
+        );
+    }
+
+    #[test]
+    fn delete_customer_return_rejected_when_batch_already_resold() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 10,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        let ret = db
+            .create_customer_return(CreateCustomerReturn {
+                receipt_number: "PT1".into(),
+                original_receipt_id: sale.id,
+                date: "2026-01-03".into(),
+                note: None,
+                items: vec![ReturnItemInput {
+                    original_item_id: sale.items[0].id,
+                    product_id: p,
+                    quantity: 5,
+                }],
+            })
+            .unwrap();
+        // Bán lại chính lô hàng vừa nhập lại kho từ phiếu trả.
+        export_items(
+            &db,
+            "HD2",
+            "2026-01-04",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 3,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+
+        let res = db.delete_return_receipt(ret.id);
+        assert!(
+            res.is_err(),
+            "không được xoá phiếu trả khi hàng nó nhập lại kho đã bán tiếp"
+        );
+        assert_eq!(stock(&db, p), 2, "tồn không đổi khi bị từ chối");
+    }
+
+    #[test]
+    fn update_customer_return_changes_quantity_correctly() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 10,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        let ret = db
+            .create_customer_return(CreateCustomerReturn {
+                receipt_number: "PT1".into(),
+                original_receipt_id: sale.id,
+                date: "2026-01-03".into(),
+                note: None,
+                items: vec![ReturnItemInput {
+                    original_item_id: sale.items[0].id,
+                    product_id: p,
+                    quantity: 3,
+                }],
+            })
+            .unwrap();
+        assert_eq!(stock(&db, p), 3);
+        assert!((db.get_customer_by_id(c).unwrap().debt - 700.0).abs() < 1e-9);
+
+        // Sửa từ trả 3 thành trả 7 — tồn và nợ phải phản ánh đúng số MỚI, không
+        // cộng dồn lên số cũ.
+        let updated = db
+            .update_customer_return(UpdateCustomerReturn {
+                id: ret.id,
+                receipt_number: "PT1".into(),
+                date: "2026-01-03".into(),
+                note: None,
+                items: vec![ReturnItemInput {
+                    original_item_id: sale.items[0].id,
+                    product_id: p,
+                    quantity: 7,
+                }],
+            })
+            .unwrap();
+        assert!((updated.total_amount - 700.0).abs() < 1e-9);
+        assert_eq!(
+            stock(&db, p),
+            7,
+            "tồn phải theo đúng số lượng mới, không cộng dồn"
+        );
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 300.0).abs() < 1e-9,
+            "nợ phải theo đúng số lượng mới"
+        );
+
+        // Sau khi sửa, vẫn phải trả được thêm tối đa đúng phần còn lại (10-7=3).
+        let res = db.create_customer_return(CreateCustomerReturn {
+            receipt_number: "PT2".into(),
+            original_receipt_id: sale.id,
+            date: "2026-01-04".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: sale.items[0].id,
+                product_id: p,
+                quantity: 4,
+            }],
+        });
+        assert!(res.is_err(), "sau khi sửa còn lại 3, không được trả thêm 4");
+    }
+
+    #[test]
+    fn update_supplier_return_changes_quantity_correctly() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let receipts = db.get_import_receipts(&list_all()).unwrap().items;
+        let receipt_id = receipts[0].id;
+        let import_item_id = receipts[0].items[0].id;
+
+        let ret = db
+            .create_supplier_return(CreateSupplierReturn {
+                receipt_number: "PTN1".into(),
+                original_receipt_id: receipt_id,
+                date: "2026-01-02".into(),
+                note: None,
+                items: vec![ReturnItemInput {
+                    original_item_id: import_item_id,
+                    product_id: p,
+                    quantity: 2,
+                }],
+            })
+            .unwrap();
+        assert_eq!(stock(&db, p), 8);
+
+        db.update_supplier_return(UpdateSupplierReturn {
+            id: ret.id,
+            receipt_number: "PTN1".into(),
+            date: "2026-01-02".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: import_item_id,
+                product_id: p,
+                quantity: 5,
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            stock(&db, p),
+            5,
+            "sửa trả NCC từ 2 thành 5 phải trừ tồn đúng theo số mới"
+        );
     }
 
     fn new_product_input(name: &str, import_price: f64, export_price: f64) -> CreateProduct {

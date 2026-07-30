@@ -19,6 +19,8 @@ pub const PERMISSION_KEYS: &[(&str, &str)] = &[
     ("exports.create", "Bán hàng / tạo phiếu xuất"),
     ("returns.customer", "Trả hàng (khách)"),
     ("returns.supplier", "Trả hàng (nhà cung cấp)"),
+    ("returns.edit", "Sửa phiếu trả hàng"),
+    ("returns.delete", "Xoá phiếu trả hàng"),
     ("customers.manage", "Quản lý khách hàng"),
     ("suppliers.manage", "Quản lý nhà cung cấp"),
     ("reports.view", "Xem báo cáo lợi nhuận"),

@@ -189,6 +189,39 @@ pub fn create_supplier_return(
 }
 
 #[tauri::command(async)]
+pub fn update_customer_return(
+    db: State<'_, Database>,
+    input: UpdateCustomerReturn,
+) -> Result<ReturnReceipt, String> {
+    db.update_customer_return(input).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn update_supplier_return(
+    db: State<'_, Database>,
+    input: UpdateSupplierReturn,
+) -> Result<ReturnReceipt, String> {
+    db.update_supplier_return(input).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn delete_return_receipt(db: State<'_, Database>, id: i64) -> Result<(), String> {
+    db.delete_return_receipt(id).map_err(map_err_vi)
+}
+
+/// Trang Trả hàng dùng khi mở lại phiếu gốc để sửa/xoá phiếu trả, không cần
+/// tải cả danh sách phiếu nhập/xuất — cùng mẫu với `get_product_by_id`.
+#[tauri::command(async)]
+pub fn get_import_receipt_by_id(db: State<'_, Database>, id: i64) -> Result<ImportReceipt, String> {
+    db.get_import_receipt(id).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn get_export_receipt_by_id(db: State<'_, Database>, id: i64) -> Result<ExportReceipt, String> {
+    db.get_export_receipt(id).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
 pub fn get_permissions() -> Vec<Permission> {
     crate::auth::PERMISSION_KEYS
         .iter()

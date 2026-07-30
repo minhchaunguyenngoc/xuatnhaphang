@@ -23,9 +23,11 @@ import type {
   ReturnReceipt,
   Supplier,
   UpdateCustomer,
+  UpdateCustomerReturn,
   UpdateImportReceipt,
   UpdateProduct,
   UpdateSupplier,
+  UpdateSupplierReturn,
   UpdateUser,
   User,
 } from "./types";
@@ -76,6 +78,15 @@ export const api = {
     invoke<ReturnReceipt>("create_customer_return", { input }),
   createSupplierReturn: (input: CreateSupplierReturn) =>
     invoke<ReturnReceipt>("create_supplier_return", { input }),
+  updateCustomerReturn: (input: UpdateCustomerReturn) =>
+    invoke<ReturnReceipt>("update_customer_return", { input }),
+  updateSupplierReturn: (input: UpdateSupplierReturn) =>
+    invoke<ReturnReceipt>("update_supplier_return", { input }),
+  deleteReturnReceipt: (id: number) => invoke<void>("delete_return_receipt", { id }),
+  getImportReceiptById: (id: number) =>
+    invoke<ImportReceipt>("get_import_receipt_by_id", { id }),
+  getExportReceiptById: (id: number) =>
+    invoke<ExportReceipt>("get_export_receipt_by_id", { id }),
   getPermissions: () => invoke<Permission[]>("get_permissions"),
   login: (input: LoginInput) => invoke<User>("login", { input }),
   getUsers: () => invoke<User[]>("get_users"),

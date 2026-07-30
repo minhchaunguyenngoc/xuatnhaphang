@@ -37,7 +37,10 @@ interface ReturnFormDialogProps {
   originalReceipt: ExportReceipt | ImportReceipt | null;
   /** Toàn bộ phiếu trả đã có, để tính số lượng còn được trả cho mỗi dòng. */
   returnReceipts: ReturnReceipt[];
+  /** Truyền vào để SỬA phiếu trả đã có, thay vì tạo phiếu mới. */
+  editingReceipt?: ReturnReceipt | null;
   onSubmit: (values: {
+    id?: number;
     receipt_number: string;
     original_receipt_id: number;
     date: string;
@@ -46,28 +49,41 @@ interface ReturnFormDialogProps {
   }) => Promise<void>;
 }
 
-/** Cha truyền `key` theo id phiếu gốc (xem imports/exports page) để component
- * remount và tự có state khởi tạo đúng mỗi lần mở — tránh đồng bộ qua useEffect. */
+/** Cha truyền `key` theo id phiếu gốc/phiếu trả đang sửa (xem imports/exports
+ * page) để component remount và tự có state khởi tạo đúng mỗi lần mở — tránh
+ * đồng bộ qua useEffect. */
 export function ReturnFormDialog({
   open,
   onOpenChange,
   returnType,
   originalReceipt,
   returnReceipts,
+  editingReceipt,
   onSubmit,
 }: ReturnFormDialogProps) {
   const prefix = returnType === "customer" ? "PTK" : "PTN";
-  const [receiptNumber, setReceiptNumber] = useState(() => generateReceiptNumber(prefix));
-  const [date, setDate] = useState(todayISO());
-  const [note, setNote] = useState("");
-  const [quantities, setQuantities] = useState<Record<number, number>>({});
+  const [receiptNumber, setReceiptNumber] = useState(
+    () => editingReceipt?.receipt_number ?? generateReceiptNumber(prefix),
+  );
+  const [date, setDate] = useState(() => editingReceipt?.date ?? todayISO());
+  const [note, setNote] = useState(() => editingReceipt?.note ?? "");
+  const [quantities, setQuantities] = useState<Record<number, number>>(() => {
+    if (!editingReceipt) return {};
+    const initial: Record<number, number> = {};
+    for (const item of editingReceipt.items) {
+      initial[item.original_item_id] = item.quantity;
+    }
+    return initial;
+  });
   const [submitting, setSubmitting] = useState(false);
 
   if (!originalReceipt) return null;
 
+  // Khi sửa, không tính chính phiếu đang sửa vào "đã trả" — số lượng của nó
+  // sắp bị thay thế hoàn toàn, không phải cộng dồn thêm.
   const alreadyReturned = (originalItemId: number) =>
     returnReceipts
-      .filter((r) => r.return_type === returnType)
+      .filter((r) => r.return_type === returnType && r.id !== editingReceipt?.id)
       .flatMap((r) => r.items)
       .filter((item) => item.original_item_id === originalItemId)
       .reduce((sum, item) => sum + item.quantity, 0);
@@ -107,6 +123,7 @@ export function ReturnFormDialog({
     setSubmitting(true);
     try {
       await onSubmit({
+        id: editingReceipt?.id,
         receipt_number: receiptNumber,
         original_receipt_id: originalReceipt.id,
         date,
@@ -124,10 +141,9 @@ export function ReturnFormDialog({
       <DialogContent className="max-h-[92vh] w-[95vw] overflow-y-auto sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>
-            {returnType === "customer"
-              ? "Trả hàng khách"
-              : "Trả hàng nhà cung cấp"}{" "}
-            — phiếu gốc {originalReceipt.receipt_number}
+            {editingReceipt ? "Sửa phiếu trả hàng" : "Trả hàng"}{" "}
+            {returnType === "customer" ? "khách" : "nhà cung cấp"} — phiếu gốc{" "}
+            {originalReceipt.receipt_number}
           </DialogTitle>
         </DialogHeader>
 
@@ -232,7 +248,11 @@ export function ReturnFormDialog({
             disabled={submitting || selectedItems.length === 0}
             onClick={handleSubmit}
           >
-            {submitting ? "Đang lưu..." : "Lưu phiếu trả"}
+            {submitting
+              ? "Đang lưu..."
+              : editingReceipt
+                ? "Lưu thay đổi"
+                : "Lưu phiếu trả"}
           </Button>
         </DialogFooter>
       </DialogContent>

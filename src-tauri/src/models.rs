@@ -298,6 +298,27 @@ pub struct CreateSupplierReturn {
     pub items: Vec<ReturnItemInput>,
 }
 
+/// Sửa phiếu trả hàng — không cho đổi phiếu bán/nhập GỐC (`original_receipt_id`)
+/// hay loại phiếu (`customer`/`supplier`): sửa nghĩa là chỉnh lại ngày/ghi
+/// chú/số lượng của chính phiếu trả đó, không phải gán sang một đơn khác.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCustomerReturn {
+    pub id: i64,
+    pub receipt_number: String,
+    pub date: String,
+    pub note: Option<String>,
+    pub items: Vec<ReturnItemInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSupplierReturn {
+    pub id: i64,
+    pub receipt_number: String,
+    pub date: String,
+    pub note: Option<String>,
+    pub items: Vec<ReturnItemInput>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReturnItem {
     pub id: i64,

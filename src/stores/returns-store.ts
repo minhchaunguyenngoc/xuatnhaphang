@@ -2,7 +2,13 @@ import { create } from "zustand";
 
 import { api } from "@/lib/api";
 import { PAGE_SIZE } from "@/stores/inventory-store";
-import type { CreateCustomerReturn, CreateSupplierReturn, ReturnReceipt } from "@/lib/types";
+import type {
+  CreateCustomerReturn,
+  CreateSupplierReturn,
+  ReturnReceipt,
+  UpdateCustomerReturn,
+  UpdateSupplierReturn,
+} from "@/lib/types";
 import { getErrorMessage } from "@/lib/errors";
 
 interface ReturnsState {
@@ -15,6 +21,9 @@ interface ReturnsState {
   fetchReturnReceipts: (opts?: { page?: number; search?: string }) => Promise<void>;
   createCustomerReturn: (input: CreateCustomerReturn) => Promise<ReturnReceipt>;
   createSupplierReturn: (input: CreateSupplierReturn) => Promise<ReturnReceipt>;
+  updateCustomerReturn: (input: UpdateCustomerReturn) => Promise<ReturnReceipt>;
+  updateSupplierReturn: (input: UpdateSupplierReturn) => Promise<ReturnReceipt>;
+  deleteReturnReceipt: (id: number) => Promise<void>;
 }
 
 export const useReturnsStore = create<ReturnsState>((set, get) => ({
@@ -76,6 +85,53 @@ export const useReturnsStore = create<ReturnsState>((set, get) => ({
       set({
         loading: false,
         error: getErrorMessage(error, "Không thể tạo phiếu trả hàng"),
+      });
+      throw error;
+    }
+  },
+
+  updateCustomerReturn: async (input) => {
+    set({ loading: true, error: null });
+    try {
+      const receipt = await api.updateCustomerReturn(input);
+      await get().fetchReturnReceipts();
+      set({ loading: false });
+      return receipt;
+    } catch (error) {
+      set({
+        loading: false,
+        error: getErrorMessage(error, "Không thể sửa phiếu trả hàng"),
+      });
+      throw error;
+    }
+  },
+
+  updateSupplierReturn: async (input) => {
+    set({ loading: true, error: null });
+    try {
+      const receipt = await api.updateSupplierReturn(input);
+      await get().fetchReturnReceipts();
+      set({ loading: false });
+      return receipt;
+    } catch (error) {
+      set({
+        loading: false,
+        error: getErrorMessage(error, "Không thể sửa phiếu trả hàng"),
+      });
+      throw error;
+    }
+  },
+
+  deleteReturnReceipt: async (id) => {
+    set({ loading: true, error: null });
+    try {
+      await api.deleteReturnReceipt(id);
+      await get().fetchReturnReceipts();
+      set({ loading: false });
+    } catch (error) {
+      set({
+        loading: false,
+        error: getErrorMessage(error, "Không thể xoá phiếu trả hàng"),
       });
       throw error;
     }

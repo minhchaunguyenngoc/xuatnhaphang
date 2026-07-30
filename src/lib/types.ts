@@ -256,6 +256,25 @@ export interface CreateSupplierReturn {
   items: ReturnItemInput[];
 }
 
+// Sửa phiếu trả hàng — không cho đổi phiếu bán/nhập gốc, chỉ sửa số phiếu/
+// ngày/ghi chú/số lượng từng dòng (khớp `UpdateCustomerReturn`/
+// `UpdateSupplierReturn` phía Rust).
+export interface UpdateCustomerReturn {
+  id: number;
+  receipt_number: string;
+  date: string;
+  note?: string | null;
+  items: ReturnItemInput[];
+}
+
+export interface UpdateSupplierReturn {
+  id: number;
+  receipt_number: string;
+  date: string;
+  note?: string | null;
+  items: ReturnItemInput[];
+}
+
 export interface ReturnItem {
   id: number;
   return_id: number;
