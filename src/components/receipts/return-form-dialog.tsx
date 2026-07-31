@@ -79,6 +79,19 @@ export function ReturnFormDialog({
 
   if (!originalReceipt) return null;
 
+  // Chiết khấu của phiếu bán gốc phải trừ vào giá trị hoàn trả — khớp CHÍNH
+  // XÁC công thức backend dùng (`apply_customer_return_lines` trong db.rs):
+  // discount_ratio = total_amount / tổng tiền các dòng. Thiếu bước này, ô
+  // "Giá trị hàng trả" hiện đúng giá niêm yết chưa trừ chiết khấu — khách
+  // hàng đã được bớt giá lúc bán nhưng phiếu trả lại không phản ánh đúng.
+  // Trả NCC không có khái niệm chiết khấu nên tỷ lệ luôn là 1.
+  const discountRatio = (() => {
+    if (returnType !== "customer") return 1;
+    const sale = originalReceipt as ExportReceipt;
+    const itemsTotal = sale.items.reduce((sum, item) => sum + item.total_price, 0);
+    return itemsTotal > 0 ? sale.total_amount / itemsTotal : 1;
+  })();
+
   // Khi sửa, không tính chính phiếu đang sửa vào "đã trả" — số lượng của nó
   // sắp bị thay thế hoàn toàn, không phải cộng dồn thêm.
   const alreadyReturned = (originalItemId: number) =>
@@ -99,7 +112,7 @@ export function ReturnFormDialog({
       original_quantity: item.quantity,
       already_returned: returned,
       max_returnable: maxReturnable,
-      unit_price: item.unit_price,
+      unit_price: item.unit_price * discountRatio,
     };
   });
 
