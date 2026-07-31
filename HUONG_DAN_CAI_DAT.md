@@ -2,6 +2,10 @@
 
 Phần mềm quản lý Nhập – Xuất hàng, chạy hoàn toàn trên máy tính của bạn (không cần internet, không lưu dữ liệu lên đâu khác).
 
+## Có gì mới trong bản 0.3.2
+
+- **Sửa lỗi ô "Giá trị hàng trả" hiện sai khi trả hàng có chiết khấu** — trước đây khi tạo hoặc sửa phiếu trả cho đơn đã bớt giá, ô này hiện đúng giá niêm yết (chưa trừ chiết khấu) thay vì đúng số tiền đã trừ giảm giá cho khách. Số tiền thực lưu vào phiếu trả luôn đúng từ trước — đây chỉ là lỗi hiển thị lúc lập phiếu, không ảnh hưởng dữ liệu đã lưu.
+
 ## Có gì mới trong bản 0.3.1
 
 - **Sửa và xoá được phiếu trả hàng** — trang Trả hàng giờ có thêm nút Sửa và Xoá cho từng phiếu (khách trả hàng lẫn trả nhà cung cấp), thêm 2 quyền riêng "Sửa phiếu trả hàng" / "Xoá phiếu trả hàng" ở trang Người dùng để cấp cho từng nhân viên. Sửa/xoá phiếu trả sẽ tự khôi phục đúng lại tồn kho và công nợ như trước khi trả — có kiểm tra chặn để không làm sai sổ sách nếu hàng vừa trả lại đã lỡ bán tiếp.
