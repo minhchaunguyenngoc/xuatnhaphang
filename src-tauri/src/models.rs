@@ -199,6 +199,21 @@ pub struct CreateExportReceipt {
     pub items: Vec<ExportItemInput>,
 }
 
+/// Không cho đổi `receipt_number` khi sửa — cùng quy ước với
+/// `UpdateImportReceipt` (số phiếu đã in ra thì không đổi lại được).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateExportReceipt {
+    pub id: i64,
+    pub date: String,
+    pub customer: Option<String>,
+    pub customer_id: Option<i64>,
+    pub discount: f64,
+    pub amount_paid: f64,
+    pub payment_method: String,
+    pub note: Option<String>,
+    pub items: Vec<ExportItemInput>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportItem {
     pub id: i64,
@@ -351,6 +366,47 @@ pub struct ReturnReceipt {
     /// Tên đối tác (khách hàng cho trả khách, nhà cung cấp cho trả NCC) —
     /// cùng lý do như trên.
     pub partner_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDebtPayment {
+    pub export_receipt_id: i64,
+    pub amount: f64,
+    pub date: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateDebtPayment {
+    pub id: i64,
+    pub amount: f64,
+    pub date: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebtPayment {
+    pub id: i64,
+    pub export_receipt_id: i64,
+    pub receipt_number: String,
+    pub customer_id: i64,
+    pub amount: f64,
+    pub date: String,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+/// 1 hoá đơn còn nợ của khách — dùng cho trang Công nợ (mỗi khách hàng liệt
+/// kê từng hoá đơn còn nợ + số còn lại của hoá đơn đó, để chọn đúng hoá đơn
+/// khi ghi nhận trả nợ).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomerDebtInvoice {
+    pub export_receipt_id: i64,
+    pub receipt_number: String,
+    pub date: String,
+    pub total_amount: f64,
+    pub amount_paid: f64,
+    pub remaining: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

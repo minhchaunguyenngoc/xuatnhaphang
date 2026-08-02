@@ -85,9 +85,17 @@ export function PaymentDialog({
             <div className="space-y-2">
               <Label>Phương thức</Label>
               <Select
-                items={{ cash: "Tiền mặt", transfer: "Chuyển khoản" }}
+                items={{ cash: "Tiền mặt", transfer: "Chuyển khoản", debt: "Công nợ" }}
                 value={method}
-                onValueChange={(v) => setMethod(v as PaymentMethod)}
+                onValueChange={(v) => {
+                  const next = v as PaymentMethod;
+                  setMethod(next);
+                  // Chọn Công nợ thì khách chưa đưa đồng nào — khỏi phải tự gõ
+                  // 0. Đổi từ Công nợ sang cách khác thì trả lại về thu đủ,
+                  // tránh vẫn còn 0 gây hiểu nhầm.
+                  if (next === "debt") setAmountPaid(0);
+                  else if (method === "debt") setAmountPaid(total);
+                }}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue />
@@ -95,10 +103,18 @@ export function PaymentDialog({
                 <SelectContent>
                   <SelectItem value="cash">Tiền mặt</SelectItem>
                   <SelectItem value="transfer">Chuyển khoản</SelectItem>
+                  <SelectItem value="debt">Công nợ</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
+
+          {method === "debt" && !hasCustomer ? (
+            <p className="text-xs text-destructive">
+              Bán ghi nợ (Công nợ) phải chọn khách hàng cụ thể, không bán được
+              cho khách lẻ.
+            </p>
+          ) : null}
 
           {change >= 0 ? (
             <div className="flex items-center justify-between text-sm">

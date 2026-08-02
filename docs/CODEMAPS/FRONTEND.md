@@ -13,6 +13,7 @@ src/
 │   ├── imports/page.tsx
 │   ├── exports/page.tsx
 │   ├── returns/page.tsx
+│   ├── debts/page.tsx
 │   ├── customers/page.tsx
 │   ├── suppliers/page.tsx
 │   ├── reports/page.tsx
@@ -22,6 +23,7 @@ src/
 │   ├── layout/             # app-shell, sidebar
 │   ├── products/           # form + picker
 │   ├── receipts/           # import/export form, return form, print
+│   ├── debts/               # debt-payment-dialog
 │   ├── pos/                # payment-dialog
 │   ├── customers|suppliers|users|settings/
 │   ├── shared/             # page-header, pagination, partner-picker, stat-card
@@ -42,6 +44,7 @@ src/
 | `/imports` | `useInventoryStore` | import receipts |
 | `/exports` | `useInventoryStore` | export receipts |
 | `/returns` | **`useReturnsStore`** | return CRUD |
+| `/debts` | **`useDebtsStore`** | `getCustomersWithDebt`, `getCustomerDebtInvoices`, debt payment CRUD |
 | `/customers` | `useInventoryStore` | customer CRUD |
 | `/suppliers` | `useInventoryStore` | supplier CRUD |
 | `/reports` | `useInventoryStore` | `getProfitReport`, receipts |
@@ -55,6 +58,7 @@ src/
 |------|--------|
 | `inventory-store.ts` | products, customers, suppliers, imports, exports, dashboard, profit, history |
 | `returns-store.ts` | returns only |
+| `debts-store.ts` | customers with debt, per-invoice debt list, debt payment CRUD |
 | `auth-store.ts` | session user, `hasPermission`, login/logout |
 | `users-store.ts` | admin users list |
 | `company-store.ts` | company name/info localStorage |
@@ -81,6 +85,7 @@ src/
 | Products | `product-form-dialog`, `product-picker` |
 | Receipts (nhập/xuất) | `receipt-form-dialog`, `invoice-print-dialog` |
 | Returns | `return-form-dialog` |
+| Debts | `debt-payment-dialog` |
 | POS | `payment-dialog` |
 | Partners | `customer-form-dialog`, `supplier-form-dialog`, `partner-picker` |
 | Auth/Users | `login-screen`, `user-form-dialog` |

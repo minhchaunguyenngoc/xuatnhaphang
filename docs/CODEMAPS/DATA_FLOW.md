@@ -26,6 +26,7 @@ store set state → re-render UI
 4. **Lợi nhuận kỳ:** tổng dòng − discount phiếu (phân bổ tỷ lệ trên report theo SP).
 5. **Trả KH:** restock batch + điều chỉnh debt/doanh thu report.
 6. **Trả NCC:** giảm tồn nếu lô còn; reject nếu đã bán hết batch.
+7. **Trả nợ (Debts):** `create/update/delete_debt_payment` cộng/trừ `export_receipts.amount_paid` và `customers.debt` cùng 1 transaction, gắn đúng 1 hoá đơn, clamp không vượt `remaining` của hoá đơn đó.
 
 ## File “source of truth” theo loại thay đổi
 
@@ -33,7 +34,7 @@ store set state → re-render UI
 |-----------|----------|
 | Tên field DTO | `models.rs` + `types.ts` + `api.ts` |
 | Rule tồn/FIFO/debt | `db.rs` section tương ứng + tests cuối file |
-| Command mới | checklist trong `FEATURE_MAP.md` §12 |
+| Command mới | checklist trong `FEATURE_MAP.md` §13 |
 | Màn hình list/filter | `app/<feature>/page.tsx` + store fetch |
 | Form dialog | `components/**/*-form-dialog.tsx` + `schemas.ts` |
 | Menu / quyền thấy trang | `sidebar.tsx` + `auth-store` |

@@ -34,7 +34,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  logout: () => set({ user: null, error: null }),
+  // Backend giữ 1 "session" riêng để tự chặn quyền (không chỉ ẩn nút ở giao
+  // diện) — phải báo cho nó biết đã đăng xuất, không thì lệnh Tauri vẫn chạy
+  // được dưới quyền của người vừa đăng xuất cho tới khi ai đó đăng nhập lại.
+  logout: () => {
+    void api.logout();
+    set({ user: null, error: null });
+  },
 
   hasPermission: (key) => {
     const user = get().user;

@@ -150,10 +150,23 @@ export interface ExportItemInput {
   unit_price: number;
 }
 
-export type PaymentMethod = "cash" | "transfer";
+export type PaymentMethod = "cash" | "transfer" | "debt";
 
 export interface CreateExportReceipt {
   receipt_number: string;
+  date: string;
+  customer?: string | null;
+  customer_id?: number | null;
+  discount: number;
+  amount_paid: number;
+  payment_method: PaymentMethod;
+  note?: string | null;
+  items: ExportItemInput[];
+}
+
+// Không cho đổi receipt_number khi sửa — cùng quy ước với UpdateImportReceipt.
+export interface UpdateExportReceipt {
+  id: number;
   date: string;
   customer?: string | null;
   customer_id?: number | null;
@@ -307,6 +320,42 @@ export interface ReturnReceipt {
 export interface Permission {
   key: string;
   label: string;
+}
+
+export interface CreateDebtPayment {
+  export_receipt_id: number;
+  amount: number;
+  date: string;
+  note?: string | null;
+}
+
+export interface UpdateDebtPayment {
+  id: number;
+  amount: number;
+  date: string;
+  note?: string | null;
+}
+
+export interface DebtPayment {
+  id: number;
+  export_receipt_id: number;
+  receipt_number: string;
+  customer_id: number;
+  amount: number;
+  date: string;
+  note: string | null;
+  created_at: string;
+}
+
+// Danh sách hoá đơn còn nợ của 1 khách hàng — dùng ở trang Công nợ để chọn
+// đúng hoá đơn khi ghi nhận trả nợ.
+export interface CustomerDebtInvoice {
+  export_receipt_id: number;
+  receipt_number: string;
+  date: string;
+  total_amount: number;
+  amount_paid: number;
+  remaining: number;
 }
 
 export interface User {

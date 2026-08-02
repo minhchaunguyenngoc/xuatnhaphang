@@ -8,9 +8,12 @@ import type {
   CreateProduct,
   CreateSupplier,
   CreateSupplierReturn,
+  CreateDebtPayment,
   CreateUser,
   Customer,
+  CustomerDebtInvoice,
   DashboardStats,
+  DebtPayment,
   ExportReceipt,
   ImportReceipt,
   InventoryHistory,
@@ -24,6 +27,8 @@ import type {
   Supplier,
   UpdateCustomer,
   UpdateCustomerReturn,
+  UpdateDebtPayment,
+  UpdateExportReceipt,
   UpdateImportReceipt,
   UpdateProduct,
   UpdateSupplier,
@@ -72,6 +77,9 @@ export const api = {
     invoke<PagedResult<ExportReceipt>>("get_export_receipts", { query }),
   createExportReceipt: (input: CreateExportReceipt) =>
     invoke<ExportReceipt>("create_export_receipt", { input }),
+  updateExportReceipt: (input: UpdateExportReceipt) =>
+    invoke<ExportReceipt>("update_export_receipt", { input }),
+  deleteExportReceipt: (id: number) => invoke<void>("delete_export_receipt", { id }),
   getReturnReceipts: (query: ListQuery) =>
     invoke<PagedResult<ReturnReceipt>>("get_return_receipts", { query }),
   createCustomerReturn: (input: CreateCustomerReturn) =>
@@ -87,8 +95,19 @@ export const api = {
     invoke<ImportReceipt>("get_import_receipt_by_id", { id }),
   getExportReceiptById: (id: number) =>
     invoke<ExportReceipt>("get_export_receipt_by_id", { id }),
+  createDebtPayment: (input: CreateDebtPayment) =>
+    invoke<DebtPayment>("create_debt_payment", { input }),
+  updateDebtPayment: (input: UpdateDebtPayment) =>
+    invoke<DebtPayment>("update_debt_payment", { input }),
+  deleteDebtPayment: (id: number) => invoke<void>("delete_debt_payment", { id }),
+  getDebtPayments: (exportReceiptId: number) =>
+    invoke<DebtPayment[]>("get_debt_payments", { exportReceiptId }),
+  getCustomersWithDebt: () => invoke<Customer[]>("get_customers_with_debt"),
+  getCustomerDebtInvoices: (customerId: number) =>
+    invoke<CustomerDebtInvoice[]>("get_customer_debt_invoices", { customerId }),
   getPermissions: () => invoke<Permission[]>("get_permissions"),
   login: (input: LoginInput) => invoke<User>("login", { input }),
+  logout: () => invoke<void>("logout"),
   getUsers: () => invoke<User[]>("get_users"),
   createUser: (input: CreateUser) => invoke<User>("create_user", { input }),
   updateUser: (input: UpdateUser) => invoke<User>("update_user", { input }),

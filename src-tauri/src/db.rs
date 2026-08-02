@@ -251,6 +251,20 @@ impl Database {
                 cost_price REAL NOT NULL DEFAULT 0,
                 total_price REAL NOT NULL
             );
+
+            -- Ghi nhận từng lần khách trả nợ, gắn với ĐÚNG 1 hoá đơn cụ thể
+            -- (người dùng tự chọn hoá đơn nào đang trả, không tự động chia
+            -- theo FIFO) — mỗi dòng vừa cộng export_receipts.amount_paid vừa
+            -- trừ customers.debt, cùng lúc, để 2 nơi luôn khớp nhau.
+            CREATE TABLE IF NOT EXISTS debt_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                export_receipt_id INTEGER NOT NULL REFERENCES export_receipts(id) ON DELETE CASCADE,
+                customer_id INTEGER NOT NULL REFERENCES customers(id),
+                amount REAL NOT NULL,
+                date TEXT NOT NULL,
+                note TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
             ",
         )?;
 
@@ -364,6 +378,9 @@ impl Database {
 
             -- Cảnh báo sắp hết hàng (dashboard + trang tồn kho).
             CREATE INDEX IF NOT EXISTS idx_products_stock ON products(stock_quantity, min_stock);
+
+            CREATE INDEX IF NOT EXISTS idx_debt_payments_export_receipt_id ON debt_payments(export_receipt_id);
+            CREATE INDEX IF NOT EXISTS idx_debt_payments_customer_id ON debt_payments(customer_id);
             ",
         )
     }
@@ -1492,6 +1509,13 @@ impl Database {
         if input.discount > items_total {
             return Err(app_err("Chiết khấu không được lớn hơn tổng tiền hàng."));
         }
+        // Bán ghi nợ (Công nợ) phải gắn đúng 1 khách hàng cụ thể để còn biết
+        // đòi nợ ai — không áp dụng cho khách lẻ (customer_id = NULL).
+        if input.payment_method == "debt" && input.customer_id.is_none() {
+            return Err(app_err(
+                "Bán ghi nợ (Công nợ) phải chọn khách hàng cụ thể, không bán được cho khách lẻ.",
+            ));
+        }
 
         let mut conn = self.conn.lock().unwrap();
 
@@ -1595,6 +1619,244 @@ impl Database {
         tx.commit()?;
         drop(conn);
         self.get_export_receipt(receipt_id)
+    }
+
+    /// Gỡ toàn bộ tác động của một hoá đơn bán hàng khỏi kho, giá vốn bình
+    /// quân và công nợ khách hàng — dùng chung cho sửa (gỡ rồi áp lại trong 1
+    /// giao dịch) lẫn xoá.
+    ///
+    /// Không thể khôi phục CHÍNH XÁC những lô gốc đã bị `consume_batches_fifo`
+    /// tiêu thụ lúc bán (hàm đó không lưu vết đã trừ ở lô nào, chỉ trả về giá
+    /// vốn bình quân của các lô đã dùng). Hoàn kho bằng cách mở 1 lô MỚI cho
+    /// mỗi dòng, đúng số lượng và đúng giá vốn đã ghi trên dòng bán đó
+    /// (`export_items.cost_price`) — kỹ thuật y hệt `apply_customer_return_lines`
+    /// đã dùng cho trả hàng khách. Về giá vốn bình quân và FIFO cho các lần
+    /// xuất SAU, kết quả tương đương lô gốc, chỉ khác thứ tự tương đối với
+    /// các lô khác cùng ngày (không ảnh hưởng số tiền).
+    ///
+    /// Chặn khi hoá đơn đã có phiếu trả hàng dựa trên nó: `return_items.
+    /// original_item_id` trỏ thẳng tới `export_items.id`; xoá/ghi đè dòng
+    /// export_items ở đây sẽ để lại tham chiếu treo trong phiếu trả.
+    fn reverse_export_effects(tx: &rusqlite::Transaction, receipt_id: i64) -> SqlResult<()> {
+        let has_returns: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM return_receipts WHERE return_type = 'customer' AND original_receipt_id = ?1",
+            params![receipt_id],
+            |row| row.get(0),
+        )?;
+        if has_returns > 0 {
+            return Err(app_err(
+                "Hoá đơn đã có phiếu trả hàng dựa trên nó, không thể sửa/xoá. Hãy xoá phiếu trả hàng liên quan trước.",
+            ));
+        }
+
+        let (customer_id, old_total, old_amount_paid, old_date): (Option<i64>, f64, f64, String) =
+            tx.query_row(
+                "SELECT customer_id, total_amount, amount_paid, date FROM export_receipts WHERE id = ?1",
+                params![receipt_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+
+        let items: Vec<(i64, i64, f64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT product_id, quantity, cost_price FROM export_items WHERE receipt_id = ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![receipt_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<SqlResult<Vec<_>>>()?;
+            rows
+        };
+
+        for (product_id, quantity, cost_price) in &items {
+            tx.execute(
+                "INSERT INTO product_batches (product_id, quantity, remaining_quantity, cost_price, import_date)
+                 VALUES (?1, ?2, ?2, ?3, ?4)",
+                params![product_id, quantity, cost_price, old_date],
+            )?;
+            tx.execute(
+                "UPDATE products SET stock_quantity = stock_quantity + ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![quantity, product_id],
+            )?;
+            Self::recompute_avg_cost(tx, *product_id)?;
+        }
+
+        if let Some(cid) = customer_id {
+            // Đối xứng chính xác với create_export_receipt: hàm đó CHỈ CỘNG
+            // (không kẹp theo nợ hiện tại), nên trừ lại cùng công thức luôn
+            // đúng — không cần cột theo dõi riêng như debt_applied ở return.
+            let applied = old_amount_paid.clamp(0.0, old_total);
+            let remaining_for_debt = (old_total - applied).max(0.0);
+            tx.execute(
+                "UPDATE customers SET total_spent = total_spent - ?1, debt = debt - ?2, updated_at = datetime('now', 'localtime') WHERE id = ?3",
+                params![old_total, remaining_for_debt, cid],
+            )?;
+        }
+
+        tx.execute(
+            "DELETE FROM inventory_history WHERE movement_type = 'export' AND reference_id = ?1",
+            params![receipt_id],
+        )?;
+
+        Ok(())
+    }
+
+    /// Sửa hoá đơn bán hàng: gỡ toàn bộ tác động cũ rồi áp lại theo dữ liệu
+    /// mới, trong CÙNG một giao dịch. Xem giới hạn ở `reverse_export_effects`.
+    pub fn update_export_receipt(&self, input: UpdateExportReceipt) -> SqlResult<ExportReceipt> {
+        if input.date.trim().is_empty() {
+            return Err(app_err("Ngày phiếu không được để trống."));
+        }
+        if input.items.is_empty() {
+            return Err(app_err("Phiếu phải có ít nhất 1 sản phẩm."));
+        }
+        for item in &input.items {
+            if item.product_id <= 0 {
+                return Err(app_err("Dòng xuất thiếu sản phẩm hợp lệ."));
+            }
+            if item.quantity < 1 {
+                return Err(app_err("Số lượng xuất phải >= 1."));
+            }
+            if item.unit_price < 0.0 {
+                return Err(app_err("Đơn giá xuất không được âm."));
+            }
+        }
+        if input.discount < 0.0 {
+            return Err(app_err("Chiết khấu không được âm."));
+        }
+        if input.amount_paid < 0.0 {
+            return Err(app_err("Số tiền thanh toán không được âm."));
+        }
+        let items_total: f64 = input
+            .items
+            .iter()
+            .map(|item| item.quantity as f64 * item.unit_price)
+            .sum();
+        if input.discount > items_total {
+            return Err(app_err("Chiết khấu không được lớn hơn tổng tiền hàng."));
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        Self::reverse_export_effects(&tx, input.id)?;
+        tx.execute(
+            "DELETE FROM export_items WHERE receipt_id = ?1",
+            params![input.id],
+        )?;
+
+        // Kiểm tồn SAU KHI đã gỡ tác động cũ (tồn đã được cộng lại từ lô
+        // hoàn) — đúng tinh thần create_export_receipt nhưng lấy tồn hiện
+        // tại (đã hoàn) làm mốc, không phải tồn trước khi sửa.
+        let mut wanted: HashMap<i64, i64> = HashMap::new();
+        for item in &input.items {
+            *wanted.entry(item.product_id).or_insert(0) += item.quantity;
+        }
+        for (product_id, need) in &wanted {
+            let (code, stock): (String, i64) = tx.query_row(
+                "SELECT code, stock_quantity FROM products WHERE id = ?1",
+                params![product_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if stock < *need {
+                return Err(app_err(format!(
+                    "Không đủ tồn kho cho sản phẩm {code}. Cần {need}, còn {stock}."
+                )));
+            }
+        }
+
+        let discount = input.discount;
+        let total_amount = items_total - discount;
+
+        let customer_name: Option<String> = match input.customer_id {
+            Some(cid) => Some(tx.query_row(
+                "SELECT name FROM customers WHERE id = ?1",
+                params![cid],
+                |row| row.get(0),
+            )?),
+            None => input.customer.clone(),
+        };
+
+        if let Some(cid) = input.customer_id {
+            let applied = input.amount_paid.clamp(0.0, total_amount);
+            let remaining_for_debt = (total_amount - applied).max(0.0);
+            tx.execute(
+                "UPDATE customers SET total_spent = total_spent + ?1, debt = debt + ?2, updated_at = datetime('now', 'localtime') WHERE id = ?3",
+                params![total_amount, remaining_for_debt, cid],
+            )?;
+        }
+
+        for item in &input.items {
+            let total_price = item.quantity as f64 * item.unit_price;
+            let total_cost = Self::consume_batches_fifo(&tx, item.product_id, item.quantity)?;
+            let cost_price = total_cost / item.quantity as f64;
+
+            tx.execute(
+                "INSERT INTO export_items (receipt_id, product_id, quantity, unit_price, total_price, cost_price)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    input.id,
+                    item.product_id,
+                    item.quantity,
+                    item.unit_price,
+                    total_price,
+                    cost_price
+                ],
+            )?;
+            tx.execute(
+                "UPDATE products SET stock_quantity = stock_quantity - ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![item.quantity, item.product_id],
+            )?;
+            Self::recompute_avg_cost(&tx, item.product_id)?;
+            tx.execute(
+                "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
+                 VALUES (?1, 'export', ?2, ?3)",
+                params![item.product_id, -item.quantity, input.id],
+            )?;
+            // Đánh dấu mốc "đã sửa hoá đơn" — cùng lý do với 'import_edit'
+            // (xem update_import_receipt): dòng 'export' ở trên phản ánh
+            // trạng thái MỚI, tự nó không cho thấy phiếu từng bị sửa.
+            tx.execute(
+                "INSERT INTO inventory_history (product_id, movement_type, quantity_change, reference_id)
+                 VALUES (?1, 'export_edit', 0, ?2)",
+                params![item.product_id, input.id],
+            )?;
+        }
+
+        tx.execute(
+            "UPDATE export_receipts SET date=?1, customer=?2, customer_id=?3, discount=?4, amount_paid=?5, payment_method=?6, note=?7, total_amount=?8
+             WHERE id=?9",
+            params![
+                input.date,
+                customer_name,
+                input.customer_id,
+                discount,
+                input.amount_paid,
+                input.payment_method,
+                input.note,
+                total_amount,
+                input.id
+            ],
+        )?;
+
+        tx.commit()?;
+        drop(conn);
+        self.get_export_receipt(input.id)
+    }
+
+    /// Xoá hẳn một hoá đơn bán hàng và gỡ mọi tác động của nó khỏi kho/công
+    /// nợ. Xem giới hạn ở `reverse_export_effects`.
+    pub fn delete_export_receipt(&self, id: i64) -> SqlResult<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        Self::reverse_export_effects(&tx, id)?;
+        tx.execute(
+            "DELETE FROM export_items WHERE receipt_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM export_receipts WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Xem ghi chú ở `get_import_receipts` — cùng nguyên tắc: phân trang
@@ -2505,6 +2767,263 @@ impl Database {
             .collect::<SqlResult<Vec<_>>>()?;
 
         Ok(ReturnReceipt { items, ..receipt })
+    }
+
+    fn get_debt_payment(&self, id: i64) -> SqlResult<DebtPayment> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT dp.id, dp.export_receipt_id, er.receipt_number, dp.customer_id, dp.amount, dp.date, dp.note, dp.created_at
+             FROM debt_payments dp
+             JOIN export_receipts er ON er.id = dp.export_receipt_id
+             WHERE dp.id = ?1",
+            params![id],
+            |row| {
+                Ok(DebtPayment {
+                    id: row.get(0)?,
+                    export_receipt_id: row.get(1)?,
+                    receipt_number: row.get(2)?,
+                    customer_id: row.get(3)?,
+                    amount: row.get(4)?,
+                    date: row.get(5)?,
+                    note: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )
+    }
+
+    /// Ghi nhận 1 lần khách trả nợ cho ĐÚNG 1 hoá đơn cụ thể (người dùng tự
+    /// chọn, không tự động chia FIFO qua nhiều hoá đơn). Cộng thẳng vào
+    /// `export_receipts.amount_paid` của hoá đơn đó và trừ `customers.debt`
+    /// — 2 nơi luôn cộng/trừ cùng lúc trong 1 giao dịch nên không bao giờ lệch
+    /// nhau, giống nguyên tắc `create_export_receipt` đã dùng.
+    pub fn create_debt_payment(&self, input: CreateDebtPayment) -> SqlResult<DebtPayment> {
+        if input.amount <= 0.0 {
+            return Err(app_err("Số tiền trả phải lớn hơn 0."));
+        }
+        if input.date.trim().is_empty() {
+            return Err(app_err("Ngày trả không được để trống."));
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let (customer_id, total_amount, amount_paid): (Option<i64>, f64, f64) = tx.query_row(
+            "SELECT customer_id, total_amount, amount_paid FROM export_receipts WHERE id = ?1",
+            params![input.export_receipt_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let customer_id = customer_id.ok_or_else(|| {
+            app_err("Hoá đơn này không gắn khách hàng cụ thể, không thể ghi nhận trả nợ.")
+        })?;
+
+        let remaining = (total_amount - amount_paid).max(0.0);
+        if input.amount > remaining {
+            return Err(app_err(format!(
+                "Số tiền trả vượt quá số đang nợ của hoá đơn này (còn nợ {remaining})."
+            )));
+        }
+
+        tx.execute(
+            "INSERT INTO debt_payments (export_receipt_id, customer_id, amount, date, note)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                input.export_receipt_id,
+                customer_id,
+                input.amount,
+                input.date,
+                input.note
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+
+        tx.execute(
+            "UPDATE export_receipts SET amount_paid = amount_paid + ?1 WHERE id = ?2",
+            params![input.amount, input.export_receipt_id],
+        )?;
+        // Không đụng total_spent — đã cộng đủ total_amount lúc tạo hoá đơn
+        // (Issue 1), trả nợ chỉ là thu hồi phần đã bán, không phải doanh thu
+        // phát sinh thêm.
+        tx.execute(
+            "UPDATE customers SET debt = MAX(debt - ?1, 0), updated_at = datetime('now', 'localtime') WHERE id = ?2",
+            params![input.amount, customer_id],
+        )?;
+
+        tx.commit()?;
+        drop(conn);
+        self.get_debt_payment(id)
+    }
+
+    /// Sửa 1 lần trả nợ đã ghi nhầm: gỡ tác động cũ rồi áp lại số mới, trong
+    /// CÙNG 1 giao dịch — kiểm tra vượt nợ với số MỚI trên nền đã gỡ số cũ,
+    /// nên không tự chặn nhầm chính lần trả đang sửa.
+    pub fn update_debt_payment(&self, input: UpdateDebtPayment) -> SqlResult<DebtPayment> {
+        if input.amount <= 0.0 {
+            return Err(app_err("Số tiền trả phải lớn hơn 0."));
+        }
+        if input.date.trim().is_empty() {
+            return Err(app_err("Ngày trả không được để trống."));
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let (export_receipt_id, customer_id, old_amount): (i64, i64, f64) = tx.query_row(
+            "SELECT export_receipt_id, customer_id, amount FROM debt_payments WHERE id = ?1",
+            params![input.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        tx.execute(
+            "UPDATE export_receipts SET amount_paid = amount_paid - ?1 WHERE id = ?2",
+            params![old_amount, export_receipt_id],
+        )?;
+        tx.execute(
+            "UPDATE customers SET debt = debt + ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+            params![old_amount, customer_id],
+        )?;
+
+        let (total_amount, amount_paid): (f64, f64) = tx.query_row(
+            "SELECT total_amount, amount_paid FROM export_receipts WHERE id = ?1",
+            params![export_receipt_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let remaining = (total_amount - amount_paid).max(0.0);
+        if input.amount > remaining {
+            // Chưa commit — transaction tự rollback khi drop, phần "gỡ" ở
+            // trên không có hiệu lực.
+            return Err(app_err(format!(
+                "Số tiền trả vượt quá số đang nợ của hoá đơn này (còn nợ {remaining})."
+            )));
+        }
+
+        tx.execute(
+            "UPDATE debt_payments SET amount = ?1, date = ?2, note = ?3 WHERE id = ?4",
+            params![input.amount, input.date, input.note, input.id],
+        )?;
+        tx.execute(
+            "UPDATE export_receipts SET amount_paid = amount_paid + ?1 WHERE id = ?2",
+            params![input.amount, export_receipt_id],
+        )?;
+        tx.execute(
+            "UPDATE customers SET debt = MAX(debt - ?1, 0), updated_at = datetime('now', 'localtime') WHERE id = ?2",
+            params![input.amount, customer_id],
+        )?;
+
+        tx.commit()?;
+        drop(conn);
+        self.get_debt_payment(input.id)
+    }
+
+    /// Xoá 1 lần trả nợ đã ghi nhầm — gỡ đúng tác động của nó.
+    pub fn delete_debt_payment(&self, id: i64) -> SqlResult<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let (export_receipt_id, customer_id, amount): (i64, i64, f64) = tx.query_row(
+            "SELECT export_receipt_id, customer_id, amount FROM debt_payments WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        tx.execute(
+            "UPDATE export_receipts SET amount_paid = amount_paid - ?1 WHERE id = ?2",
+            params![amount, export_receipt_id],
+        )?;
+        tx.execute(
+            "UPDATE customers SET debt = debt + ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+            params![amount, customer_id],
+        )?;
+        tx.execute("DELETE FROM debt_payments WHERE id = ?1", params![id])?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Lịch sử trả nợ của 1 hoá đơn — dùng cho trang Công nợ khi xem/sửa/xoá
+    /// từng lần trả của một hoá đơn cụ thể.
+    pub fn get_debt_payments(&self, export_receipt_id: i64) -> SqlResult<Vec<DebtPayment>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT dp.id, dp.export_receipt_id, er.receipt_number, dp.customer_id, dp.amount, dp.date, dp.note, dp.created_at
+             FROM debt_payments dp
+             JOIN export_receipts er ON er.id = dp.export_receipt_id
+             WHERE dp.export_receipt_id = ?1
+             ORDER BY dp.date DESC, dp.id DESC",
+        )?;
+        let payments = stmt
+            .query_map(params![export_receipt_id], |row| {
+                Ok(DebtPayment {
+                    id: row.get(0)?,
+                    export_receipt_id: row.get(1)?,
+                    receipt_number: row.get(2)?,
+                    customer_id: row.get(3)?,
+                    amount: row.get(4)?,
+                    date: row.get(5)?,
+                    note: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(payments)
+    }
+
+    /// Khách hàng đang có nợ (debt > 0) — danh sách cho trang Công nợ. Không
+    /// cần phân trang: số khách còn nợ thực tế luôn nhỏ hơn nhiều tổng số
+    /// khách, khác với danh sách khách hàng đầy đủ.
+    pub fn get_customers_with_debt(&self) -> SqlResult<Vec<Customer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, code, name, phone, address, note, debt, total_spent, created_at, updated_at
+             FROM customers WHERE debt > 0 ORDER BY debt DESC",
+        )?;
+        let customers = stmt
+            .query_map([], |row| {
+                Ok(Customer {
+                    id: row.get(0)?,
+                    code: row.get(1)?,
+                    name: row.get(2)?,
+                    phone: row.get(3)?,
+                    address: row.get(4)?,
+                    note: row.get(5)?,
+                    debt: row.get(6)?,
+                    total_spent: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(customers)
+    }
+
+    /// Từng hoá đơn còn nợ của 1 khách hàng — để chọn đúng hoá đơn khi ghi
+    /// nhận trả nợ, và hiện "từng hoá đơn + tổng" ở trang Công nợ.
+    pub fn get_customer_debt_invoices(
+        &self,
+        customer_id: i64,
+    ) -> SqlResult<Vec<CustomerDebtInvoice>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, receipt_number, date, total_amount, amount_paid
+             FROM export_receipts
+             WHERE customer_id = ?1 AND total_amount > amount_paid
+             ORDER BY date ASC, id ASC",
+        )?;
+        let invoices = stmt
+            .query_map(params![customer_id], |row| {
+                let total_amount: f64 = row.get(3)?;
+                let amount_paid: f64 = row.get(4)?;
+                Ok(CustomerDebtInvoice {
+                    export_receipt_id: row.get(0)?,
+                    receipt_number: row.get(1)?,
+                    date: row.get(2)?,
+                    total_amount,
+                    amount_paid,
+                    remaining: (total_amount - amount_paid).max(0.0),
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(invoices)
     }
 
     fn map_user_row(row: &rusqlite::Row) -> SqlResult<UserRow> {
@@ -3570,6 +4089,432 @@ mod tests {
         });
         assert!(res.is_err(), "phải từ chối sửa khi lô đã bị xuất đụng tới");
         assert_eq!(stock(&db, p), 5, "tồn không đổi khi sửa bị từ chối");
+    }
+
+    #[test]
+    fn update_export_receipt_changes_quantity_and_recomputes_debt() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 20, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        assert_eq!(stock(&db, p), 15);
+        assert!((db.get_customer_by_id(c).unwrap().debt - 500.0).abs() < 1e-9);
+
+        let updated = db
+            .update_export_receipt(UpdateExportReceipt {
+                id: sale.id,
+                date: "2026-01-02".into(),
+                customer: None,
+                customer_id: Some(c),
+                discount: 0.0,
+                amount_paid: 0.0,
+                payment_method: "cash".into(),
+                note: None,
+                items: vec![ExportItemInput {
+                    product_id: p,
+                    quantity: 8,
+                    unit_price: 100.0,
+                }],
+            })
+            .unwrap();
+        assert!((updated.total_amount - 800.0).abs() < 1e-9);
+        assert_eq!(
+            stock(&db, p),
+            12,
+            "sửa từ bán 5 thành bán 8 phải trừ đúng theo số mới (20-8), không cộng dồn"
+        );
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 800.0).abs() < 1e-9,
+            "nợ phải theo đúng tổng tiền mới, không cộng dồn lên nợ cũ"
+        );
+    }
+
+    #[test]
+    fn update_and_delete_export_receipt_rejected_when_has_return() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        db.create_customer_return(CreateCustomerReturn {
+            receipt_number: "PT1".into(),
+            original_receipt_id: sale.id,
+            date: "2026-01-03".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: sale.items[0].id,
+                product_id: p,
+                quantity: 2,
+            }],
+        })
+        .unwrap();
+
+        let update_res = db.update_export_receipt(UpdateExportReceipt {
+            id: sale.id,
+            date: "2026-01-02".into(),
+            customer: None,
+            customer_id: None,
+            discount: 0.0,
+            amount_paid: 0.0,
+            payment_method: "cash".into(),
+            note: None,
+            items: vec![ExportItemInput {
+                product_id: p,
+                quantity: 3,
+                unit_price: 100.0,
+            }],
+        });
+        assert!(
+            update_res.is_err(),
+            "không được sửa hoá đơn đã có phiếu trả hàng dựa trên nó"
+        );
+
+        let delete_res = db.delete_export_receipt(sale.id);
+        assert!(
+            delete_res.is_err(),
+            "không được xoá hoá đơn đã có phiếu trả hàng dựa trên nó"
+        );
+    }
+
+    #[test]
+    fn delete_export_receipt_reverses_stock_and_debt() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        assert_eq!(stock(&db, p), 5);
+        assert!((db.get_customer_by_id(c).unwrap().debt - 500.0).abs() < 1e-9);
+
+        db.delete_export_receipt(sale.id).unwrap();
+        assert_eq!(stock(&db, p), 10, "xoá hoá đơn phải hoàn lại đúng tồn kho");
+        assert!(
+            db.get_customer_by_id(c).unwrap().debt.abs() < 1e-9,
+            "xoá hoá đơn phải xoá đúng phần nợ đã ghi"
+        );
+        assert_eq!(
+            db.get_export_receipts(&list_all()).unwrap().total,
+            0,
+            "hoá đơn phải biến mất khỏi danh sách"
+        );
+    }
+
+    #[test]
+    fn export_receipt_rejects_debt_payment_method_without_customer() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+
+        let res = db.create_export_receipt(CreateExportReceipt {
+            receipt_number: "HD1".into(),
+            date: "2026-01-02".into(),
+            customer: None,
+            customer_id: None,
+            discount: 0.0,
+            amount_paid: 0.0,
+            payment_method: "debt".into(),
+            note: None,
+            items: vec![ExportItemInput {
+                product_id: p,
+                quantity: 1,
+                unit_price: 100.0,
+            }],
+        });
+        assert!(
+            res.is_err(),
+            "bán ghi nợ (Công nợ) phải gắn khách hàng cụ thể, không được bán cho khách lẻ"
+        );
+    }
+
+    #[test]
+    fn create_debt_payment_reduces_debt_and_updates_invoice() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = db
+            .create_export_receipt(CreateExportReceipt {
+                receipt_number: "HD1".into(),
+                date: "2026-01-02".into(),
+                customer: None,
+                customer_id: Some(c),
+                discount: 0.0,
+                amount_paid: 0.0,
+                payment_method: "debt".into(),
+                note: None,
+                items: vec![ExportItemInput {
+                    product_id: p,
+                    quantity: 5,
+                    unit_price: 100.0,
+                }],
+            })
+            .unwrap();
+        assert!((db.get_customer_by_id(c).unwrap().debt - 500.0).abs() < 1e-9);
+
+        let payment = db
+            .create_debt_payment(CreateDebtPayment {
+                export_receipt_id: sale.id,
+                amount: 200.0,
+                date: "2026-01-05".into(),
+                note: None,
+            })
+            .unwrap();
+        assert!((payment.amount - 200.0).abs() < 1e-9);
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 300.0).abs() < 1e-9,
+            "nợ khách phải giảm đúng số đã trả"
+        );
+        let invoices = db.get_customer_debt_invoices(c).unwrap();
+        assert_eq!(invoices.len(), 1);
+        assert!(
+            (invoices[0].remaining - 300.0).abs() < 1e-9,
+            "hoá đơn phải hiện đúng số còn nợ sau khi trả 1 phần"
+        );
+
+        // Trả nốt phần còn lại — hoá đơn phải biến mất khỏi danh sách còn nợ.
+        db.create_debt_payment(CreateDebtPayment {
+            export_receipt_id: sale.id,
+            amount: 300.0,
+            date: "2026-01-06".into(),
+            note: None,
+        })
+        .unwrap();
+        assert!(db.get_customer_by_id(c).unwrap().debt.abs() < 1e-9);
+        assert_eq!(
+            db.get_customer_debt_invoices(c).unwrap().len(),
+            0,
+            "trả hết nợ thì hoá đơn không còn xuất hiện trong danh sách còn nợ"
+        );
+    }
+
+    #[test]
+    fn create_debt_payment_rejects_amount_exceeding_invoice_remaining() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+
+        let res = db.create_debt_payment(CreateDebtPayment {
+            export_receipt_id: sale.id,
+            amount: 600.0,
+            date: "2026-01-05".into(),
+            note: None,
+        });
+        assert!(
+            res.is_err(),
+            "không được trả nhiều hơn số đang nợ của hoá đơn (nợ 500)"
+        );
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 500.0).abs() < 1e-9,
+            "nợ không đổi khi bị từ chối"
+        );
+    }
+
+    #[test]
+    fn update_debt_payment_changes_amount_correctly() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        let payment = db
+            .create_debt_payment(CreateDebtPayment {
+                export_receipt_id: sale.id,
+                amount: 100.0,
+                date: "2026-01-05".into(),
+                note: None,
+            })
+            .unwrap();
+        assert!((db.get_customer_by_id(c).unwrap().debt - 400.0).abs() < 1e-9);
+
+        // Sửa từ trả 100 thành trả 300 — nợ phải theo đúng số MỚI, không cộng dồn.
+        db.update_debt_payment(UpdateDebtPayment {
+            id: payment.id,
+            amount: 300.0,
+            date: "2026-01-05".into(),
+            note: None,
+        })
+        .unwrap();
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 200.0).abs() < 1e-9,
+            "sửa lần trả từ 100 thành 300 thì nợ phải còn đúng 200, không cộng dồn"
+        );
+
+        // Sửa vượt quá số đang nợ (còn 500 gốc, đã sửa xuống trả 300 -> muốn
+        // sửa thành 600 là vượt quá 500) phải bị từ chối, không làm hỏng dữ liệu.
+        let res = db.update_debt_payment(UpdateDebtPayment {
+            id: payment.id,
+            amount: 600.0,
+            date: "2026-01-05".into(),
+            note: None,
+        });
+        assert!(res.is_err());
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 200.0).abs() < 1e-9,
+            "nợ không đổi khi sửa bị từ chối"
+        );
+    }
+
+    #[test]
+    fn delete_debt_payment_restores_debt() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        let payment = db
+            .create_debt_payment(CreateDebtPayment {
+                export_receipt_id: sale.id,
+                amount: 200.0,
+                date: "2026-01-05".into(),
+                note: None,
+            })
+            .unwrap();
+        assert!((db.get_customer_by_id(c).unwrap().debt - 300.0).abs() < 1e-9);
+
+        db.delete_debt_payment(payment.id).unwrap();
+        assert!(
+            (db.get_customer_by_id(c).unwrap().debt - 500.0).abs() < 1e-9,
+            "xoá lần trả nợ phải cộng lại đúng số đã trừ"
+        );
+        assert_eq!(
+            db.get_debt_payments(sale.id).unwrap().len(),
+            0,
+            "lần trả nợ đã xoá phải biến mất khỏi lịch sử"
+        );
     }
 
     #[test]

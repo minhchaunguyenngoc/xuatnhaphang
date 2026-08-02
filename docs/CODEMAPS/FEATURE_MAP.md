@@ -58,12 +58,13 @@ Quy ước cột:
 | UI POS | `src/app/pos/page.tsx`, `src/components/pos/payment-dialog.tsx` |
 | UI list | `src/app/exports/page.tsx` |
 | Shared form | `src/components/receipts/receipt-form-dialog.tsx`, `invoice-print-dialog.tsx` |
-| Store | `inventory-store` → `fetchExportReceipts`, `createExportReceipt` |
-| API | `getExportReceipts`, `createExportReceipt`, `getExportReceiptById` |
-| DB | `create_export_receipt`, `get_export_receipts`, `get_export_receipt` + helpers `consume_batches_fifo`, `recompute_avg_cost` |
+| Store | `inventory-store` → `fetchExportReceipts`, `createExportReceipt`, `updateExportReceipt`, `deleteExportReceipt` |
+| API | `getExportReceipts`, `createExportReceipt`, `updateExportReceipt`, `deleteExportReceipt`, `getExportReceiptById` |
+| DB | `create_export_receipt`, `update_export_receipt`, `delete_export_receipt`, `get_export_receipts`, `get_export_receipt` + helpers `consume_batches_fifo`, `recompute_avg_cost` |
 | Tables | `export_receipts`, `export_items`, `products`, `product_batches`, `inventory_history`, `customers` (debt) |
+| Permission | `exports.edit` (sửa ngày/khách/mặt hàng/ghi chú qua `receipt-form-dialog.tsx`, không đổi chiết khấu/đã thu), `exports.delete` (xoá phải reverse tồn kho + debt; chặn nếu đã có phiếu trả hàng dựa trên hoá đơn) |
 
-**Quy tắc:** FIFO theo `import_date`; `export_items.cost_price` = giá vốn thực; debt = `total - amount_paid` (clamp paid); discount cấp phiếu.
+**Quy tắc:** FIFO theo `import_date`; `export_items.cost_price` = giá vốn thực; debt = `total - amount_paid` (clamp paid); discount cấp phiếu. Sửa hoá đơn qua `receipt-form-dialog.tsx` không đổi chiết khấu/số tiền đã thu/hình thức thanh toán — đổi trạng thái thanh toán thuộc trang [Debts](#6-debts-công-nợ-khách-hàng) riêng.
 
 ---
 
@@ -81,7 +82,22 @@ Quy ước cột:
 
 ---
 
-## 6. Inventory (Kiểm kho / lịch sử)
+## 6. Debts (Công nợ khách hàng)
+
+| Layer | Files |
+|-------|--------|
+| UI | `src/app/debts/page.tsx`, `src/components/debts/debt-payment-dialog.tsx` |
+| Store | `src/stores/debts-store.ts` (riêng, không gộp inventory-store) |
+| API | `getCustomersWithDebt`, `getCustomerDebtInvoices`, `getDebtPayments`, `createDebtPayment`, `updateDebtPayment`, `deleteDebtPayment` |
+| DB | `get_customers_with_debt`, `get_customer_debt_invoices`, `get_debt_payments`, `create_debt_payment`, `update_debt_payment`, `delete_debt_payment` |
+| Tables | `debt_payments`, `export_receipts` (`amount_paid`), `customers` (`debt`) |
+| Permission | `debts.manage` (`auth.rs` PERMISSION_KEYS) |
+
+**Quy tắc:** trả nợ gắn vào ĐÚNG 1 hoá đơn (`export_receipt_id`), không tự chia FIFO qua nhiều hoá đơn; cộng/trừ `export_receipts.amount_paid` và `customers.debt` luôn cùng 1 transaction; sửa/xoá lần trả phải gỡ tác động cũ trước khi áp lại (xem test `update_debt_payment`/`delete_debt_payment_restores_debt` trong `db.rs`).
+
+---
+
+## 7. Inventory (Kiểm kho / lịch sử)
 
 | Layer | Files |
 |-------|--------|
@@ -93,7 +109,7 @@ Quy ước cột:
 
 ---
 
-## 7. Customers / Suppliers
+## 8. Customers / Suppliers
 
 | Feature | UI | Store | API/DB |
 |---------|----|-------|--------|
@@ -105,7 +121,7 @@ Tables: `customers`, `suppliers` (+ `debt`).
 
 ---
 
-## 8. Reports (Báo cáo + Excel)
+## 9. Reports (Báo cáo + Excel)
 
 | Layer | Files |
 |-------|--------|
@@ -120,7 +136,7 @@ Tables: `customers`, `suppliers` (+ `debt`).
 
 ---
 
-## 9. Auth / Users / Permissions
+## 10. Auth / Users / Permissions
 
 | Layer | Files |
 |-------|--------|
@@ -132,11 +148,11 @@ Tables: `customers`, `suppliers` (+ `debt`).
 | Backend | `src-tauri/src/auth.rs` (hash/verify), `db.rs` login/users, `commands.rs` |
 | Tables | `users`, `user_permissions`, `audit_log` |
 
-Permissions keys (UI): `products.manage`, `imports.create`, `imports.edit`, `exports.create`, `suppliers.manage`, `customers.manage`, `returns.customer`, `returns.supplier`, `returns.edit`, `returns.delete`, `reports.view`, …
+Permissions keys (UI): `products.manage`, `imports.create`, `imports.edit`, `exports.create`, `exports.edit`, `exports.delete`, `suppliers.manage`, `customers.manage`, `returns.customer`, `returns.supplier`, `returns.edit`, `returns.delete`, `debts.manage`, `reports.view`, `settings.manage`.
 
 ---
 
-## 10. Company settings (local UI only)
+## 11. Company settings (local UI only)
 
 | Layer | Files |
 |-------|--------|
@@ -145,7 +161,7 @@ Permissions keys (UI): `products.manage`, `imports.create`, `imports.edit`, `exp
 
 ---
 
-## 11. Shared / UI kit (chỉ khi sửa design system)
+## 12. Shared / UI kit (chỉ khi sửa design system)
 
 | Area | Path |
 |------|------|
@@ -158,7 +174,7 @@ Permissions keys (UI): `products.manage`, `imports.create`, `imports.edit`, `exp
 
 ---
 
-## 12. Khi thêm command mới (checklist)
+## 13. Khi thêm command mới (checklist)
 
 1. Struct input/output trong `src-tauri/src/models.rs`
 2. Method trong `src-tauri/src/db.rs` (+ test trong `#[cfg(test)]` cuối file)
@@ -171,7 +187,7 @@ Permissions keys (UI): `products.manage`, `imports.create`, `imports.edit`, `exp
 
 ---
 
-## 13. Khi sửa schema DB
+## 14. Khi sửa schema DB
 
 1. `init_schema` / `add_column_if_missing` trong `db.rs` (không phá DB cũ)
 2. Model + types.ts

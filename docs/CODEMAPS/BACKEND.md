@@ -7,7 +7,7 @@
 | `main.rs` | Entry binary | 6 |
 | `lib.rs` | Bootstrap DB, `invoke_handler` đăng ký commands | 68 |
 | `commands.rs` | Thin Tauri wrappers → `db.*` | 277 |
-| `db.rs` | **Toàn bộ SQL + business logic + unit tests** | ~4300 |
+| `db.rs` | **Toàn bộ SQL + business logic + unit tests** | ~5230 |
 | `models.rs` | DTO serde (Product, Receipts, User…) | ~400 |
 | `auth.rs` | `hash_password` / `verify_password` (argon2) | 45 |
 
@@ -27,44 +27,48 @@ Config: `src-tauri/tauri.conf.json`, `Cargo.toml`, `capabilities/default.json`.
 
 | Khoảng | Nội dung |
 |--------|----------|
-| ~1–100 | `Database`, `app_err`, validate header, path helpers |
-| ~105–480 | `init_schema`, indexes, migrations, `add_column_if_missing`, backfill |
-| ~482–550 | **FIFO:** `consume_batches_fifo`, `recompute_avg_cost` |
+| ~1–104 | `Database`, `app_err`, validate header, path helpers |
+| ~105–467 | `init_schema`, indexes, migrations, `add_column_if_missing`, backfill |
+| ~499–571 | **FIFO:** `consume_batches_fifo`, `recompute_avg_cost` |
 
-### Products (~555–790)
+### Products (~572–814)
 
 `get_products`, `get_low_stock_products`, `create_product`, `insert_product`, `generate_product_code`, `update_product`, `delete_product`, `get_product_by_id`
 
-### Customers (~798–925)
+### Customers (~815–946)
 
 CRUD + `map_customer`
 
-### Suppliers (~930–1045)
+### Suppliers (~947–1067)
 
 CRUD + `map_supplier`
 
-### Imports (~1051–1460)
+### Imports (~1068–1480)
 
 `create_import_receipt`, `get_import_receipts`, `get_import_receipt`, `update_import_receipt`
 
-### Exports (~1464–1755)
+### Exports (~1481–1964)
 
-`create_export_receipt`, `get_export_receipts`, `get_export_receipt`
+`create_export_receipt`, `reverse_export_effects`, `update_export_receipt`, `delete_export_receipt`, `get_export_receipts`, `get_export_receipt`
 
-### Returns (~1758–2510)
+### Returns (~2020–2718)
 
 Helpers: `apply_customer_return_lines`, `apply_customer_return_debt`, `apply_supplier_return_*`, `reverse_return_effects`  
 Public: create/update customer|supplier return, `delete_return_receipt`, `get_return_receipts`
 
-### Auth / users (~2510–2745)
+### Debt payments (~2772–3027)
+
+`get_debt_payment`, `create_debt_payment`, `update_debt_payment`, `delete_debt_payment`, `get_debt_payments`, `get_customers_with_debt`, `get_customer_debt_invoices` — xem [FEATURE_MAP.md §6](FEATURE_MAP.md#6-debts-công-nợ-khách-hàng)
+
+### Auth / users (~3029–3267)
 
 `login`, `get_users`, `create_user`, `update_user`, `delete_user`, permissions load
 
-### Dashboard / reports / history (~2749–3020)
+### Dashboard / reports / history (~3268–3554)
 
 `get_dashboard_stats`, `get_profit_report`, `get_inventory_history`
 
-### Init + tests (~3026–end)
+### Init + tests (~3555–end)
 
 `init_database`, `#[cfg(test)]` — FIFO, debt, profit, returns, product code, pagination
 
@@ -79,6 +83,7 @@ Public: create/update customer|supplier return, `delete_return_receipt`, `get_re
 | `return_receipts` / `return_items` | Trả hàng KH / NCC |
 | `inventory_history` | Lịch sử biến động / đổi giá |
 | `customers` / `suppliers` | Đối tác + `debt` |
+| `debt_payments` | Từng lần khách trả nợ, gắn 1 `export_receipt_id` cụ thể |
 | `users` / `user_permissions` | Auth local |
 | `audit_log` | Audit |
 
@@ -93,7 +98,9 @@ DB file: app data dir / `inventory.db` (local, single-user).
 | Không oversell | check stock trong `create_export_receipt` |
 | Công nợ KH | clamp `amount_paid` trong export; return giảm debt |
 | Sửa phiếu nhập | `update_import_receipt` — reject nếu batch đã bán |
+| Sửa/xoá phiếu xuất | `update_export_receipt`/`delete_export_receipt` — reject nếu đã có phiếu trả hàng dựa trên hoá đơn |
 | Reverse trả hàng | `reverse_return_effects` |
+| Trả nợ theo hoá đơn | `create/update/delete_debt_payment` — gắn đúng 1 `export_receipt_id`, clamp không vượt `remaining` |
 | Profit + discount + returns | `get_profit_report` |
 
 ## Tests nên chạy khi đụng hotspot

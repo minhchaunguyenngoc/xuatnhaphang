@@ -13,6 +13,7 @@
 
 use tauri::State;
 
+use crate::auth::Session;
 use crate::db::Database;
 use crate::models::*;
 
@@ -54,17 +55,32 @@ pub fn get_product_by_id(db: State<'_, Database>, id: i64) -> Result<Product, St
 }
 
 #[tauri::command(async)]
-pub fn create_product(db: State<'_, Database>, input: CreateProduct) -> Result<Product, String> {
+pub fn create_product(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: CreateProduct,
+) -> Result<Product, String> {
+    session.require("products.manage")?;
     db.create_product(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn update_product(db: State<'_, Database>, input: UpdateProduct) -> Result<Product, String> {
+pub fn update_product(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: UpdateProduct,
+) -> Result<Product, String> {
+    session.require("products.manage")?;
     db.update_product(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn delete_product(db: State<'_, Database>, id: i64) -> Result<(), String> {
+pub fn delete_product(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    id: i64,
+) -> Result<(), String> {
+    session.require("products.manage")?;
     db.delete_product(id).map_err(map_err_vi)
 }
 
@@ -82,17 +98,32 @@ pub fn get_customer_by_id(db: State<'_, Database>, id: i64) -> Result<Customer, 
 }
 
 #[tauri::command(async)]
-pub fn create_customer(db: State<'_, Database>, input: CreateCustomer) -> Result<Customer, String> {
+pub fn create_customer(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: CreateCustomer,
+) -> Result<Customer, String> {
+    session.require("customers.manage")?;
     db.create_customer(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn update_customer(db: State<'_, Database>, input: UpdateCustomer) -> Result<Customer, String> {
+pub fn update_customer(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: UpdateCustomer,
+) -> Result<Customer, String> {
+    session.require("customers.manage")?;
     db.update_customer(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn delete_customer(db: State<'_, Database>, id: i64) -> Result<(), String> {
+pub fn delete_customer(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    id: i64,
+) -> Result<(), String> {
+    session.require("customers.manage")?;
     db.delete_customer(id).map_err(map_err_vi)
 }
 
@@ -110,17 +141,32 @@ pub fn get_supplier_by_id(db: State<'_, Database>, id: i64) -> Result<Supplier, 
 }
 
 #[tauri::command(async)]
-pub fn create_supplier(db: State<'_, Database>, input: CreateSupplier) -> Result<Supplier, String> {
+pub fn create_supplier(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: CreateSupplier,
+) -> Result<Supplier, String> {
+    session.require("suppliers.manage")?;
     db.create_supplier(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn update_supplier(db: State<'_, Database>, input: UpdateSupplier) -> Result<Supplier, String> {
+pub fn update_supplier(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: UpdateSupplier,
+) -> Result<Supplier, String> {
+    session.require("suppliers.manage")?;
     db.update_supplier(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn delete_supplier(db: State<'_, Database>, id: i64) -> Result<(), String> {
+pub fn delete_supplier(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    id: i64,
+) -> Result<(), String> {
+    session.require("suppliers.manage")?;
     db.delete_supplier(id).map_err(map_err_vi)
 }
 
@@ -135,16 +181,20 @@ pub fn get_import_receipts(
 #[tauri::command(async)]
 pub fn create_import_receipt(
     db: State<'_, Database>,
+    session: State<'_, Session>,
     input: CreateImportReceipt,
 ) -> Result<ImportReceipt, String> {
+    session.require("imports.create")?;
     db.create_import_receipt(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
 pub fn update_import_receipt(
     db: State<'_, Database>,
+    session: State<'_, Session>,
     input: UpdateImportReceipt,
 ) -> Result<ImportReceipt, String> {
+    session.require("imports.edit")?;
     db.update_import_receipt(input).map_err(map_err_vi)
 }
 
@@ -159,9 +209,31 @@ pub fn get_export_receipts(
 #[tauri::command(async)]
 pub fn create_export_receipt(
     db: State<'_, Database>,
+    session: State<'_, Session>,
     input: CreateExportReceipt,
 ) -> Result<ExportReceipt, String> {
+    session.require("exports.create")?;
     db.create_export_receipt(input).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn update_export_receipt(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: UpdateExportReceipt,
+) -> Result<ExportReceipt, String> {
+    session.require("exports.edit")?;
+    db.update_export_receipt(input).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn delete_export_receipt(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    id: i64,
+) -> Result<(), String> {
+    session.require("exports.delete")?;
+    db.delete_export_receipt(id).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
@@ -175,37 +247,50 @@ pub fn get_return_receipts(
 #[tauri::command(async)]
 pub fn create_customer_return(
     db: State<'_, Database>,
+    session: State<'_, Session>,
     input: CreateCustomerReturn,
 ) -> Result<ReturnReceipt, String> {
+    session.require("returns.customer")?;
     db.create_customer_return(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
 pub fn create_supplier_return(
     db: State<'_, Database>,
+    session: State<'_, Session>,
     input: CreateSupplierReturn,
 ) -> Result<ReturnReceipt, String> {
+    session.require("returns.supplier")?;
     db.create_supplier_return(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
 pub fn update_customer_return(
     db: State<'_, Database>,
+    session: State<'_, Session>,
     input: UpdateCustomerReturn,
 ) -> Result<ReturnReceipt, String> {
+    session.require("returns.edit")?;
     db.update_customer_return(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
 pub fn update_supplier_return(
     db: State<'_, Database>,
+    session: State<'_, Session>,
     input: UpdateSupplierReturn,
 ) -> Result<ReturnReceipt, String> {
+    session.require("returns.edit")?;
     db.update_supplier_return(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn delete_return_receipt(db: State<'_, Database>, id: i64) -> Result<(), String> {
+pub fn delete_return_receipt(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    id: i64,
+) -> Result<(), String> {
+    session.require("returns.delete")?;
     db.delete_return_receipt(id).map_err(map_err_vi)
 }
 
@@ -222,6 +307,58 @@ pub fn get_export_receipt_by_id(db: State<'_, Database>, id: i64) -> Result<Expo
 }
 
 #[tauri::command(async)]
+pub fn create_debt_payment(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: CreateDebtPayment,
+) -> Result<DebtPayment, String> {
+    session.require("debts.manage")?;
+    db.create_debt_payment(input).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn update_debt_payment(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: UpdateDebtPayment,
+) -> Result<DebtPayment, String> {
+    session.require("debts.manage")?;
+    db.update_debt_payment(input).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn delete_debt_payment(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    id: i64,
+) -> Result<(), String> {
+    session.require("debts.manage")?;
+    db.delete_debt_payment(id).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn get_debt_payments(
+    db: State<'_, Database>,
+    export_receipt_id: i64,
+) -> Result<Vec<DebtPayment>, String> {
+    db.get_debt_payments(export_receipt_id).map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn get_customers_with_debt(db: State<'_, Database>) -> Result<Vec<Customer>, String> {
+    db.get_customers_with_debt().map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
+pub fn get_customer_debt_invoices(
+    db: State<'_, Database>,
+    customer_id: i64,
+) -> Result<Vec<CustomerDebtInvoice>, String> {
+    db.get_customer_debt_invoices(customer_id)
+        .map_err(map_err_vi)
+}
+
+#[tauri::command(async)]
 pub fn get_permissions() -> Vec<Permission> {
     crate::auth::PERMISSION_KEYS
         .iter()
@@ -233,27 +370,57 @@ pub fn get_permissions() -> Vec<Permission> {
 }
 
 #[tauri::command(async)]
-pub fn login(db: State<'_, Database>, input: LoginInput) -> Result<User, String> {
-    db.login(input).map_err(map_err_vi)
+pub fn login(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: LoginInput,
+) -> Result<User, String> {
+    let user = db.login(input).map_err(map_err_vi)?;
+    session.set(user.clone());
+    Ok(user)
 }
 
 #[tauri::command(async)]
-pub fn get_users(db: State<'_, Database>) -> Result<Vec<User>, String> {
+pub fn logout(session: State<'_, Session>) {
+    session.clear();
+}
+
+#[tauri::command(async)]
+pub fn get_users(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+) -> Result<Vec<User>, String> {
+    session.require_admin()?;
     db.get_users().map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn create_user(db: State<'_, Database>, input: CreateUser) -> Result<User, String> {
+pub fn create_user(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: CreateUser,
+) -> Result<User, String> {
+    session.require_admin()?;
     db.create_user(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn update_user(db: State<'_, Database>, input: UpdateUser) -> Result<User, String> {
+pub fn update_user(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    input: UpdateUser,
+) -> Result<User, String> {
+    session.require_admin()?;
     db.update_user(input).map_err(map_err_vi)
 }
 
 #[tauri::command(async)]
-pub fn delete_user(db: State<'_, Database>, id: i64) -> Result<(), String> {
+pub fn delete_user(
+    db: State<'_, Database>,
+    session: State<'_, Session>,
+    id: i64,
+) -> Result<(), String> {
+    session.require_admin()?;
     db.delete_user(id).map_err(map_err_vi)
 }
 

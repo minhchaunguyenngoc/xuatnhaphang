@@ -20,6 +20,7 @@ pub fn run() {
 
             let database = init_database(app.handle()).expect("failed to initialize database");
             app.manage(database);
+            app.manage(auth::Session::default());
 
             Ok(())
         })
@@ -45,6 +46,8 @@ pub fn run() {
             commands::update_import_receipt,
             commands::get_export_receipts,
             commands::create_export_receipt,
+            commands::update_export_receipt,
+            commands::delete_export_receipt,
             commands::get_return_receipts,
             commands::create_customer_return,
             commands::create_supplier_return,
@@ -53,8 +56,15 @@ pub fn run() {
             commands::delete_return_receipt,
             commands::get_import_receipt_by_id,
             commands::get_export_receipt_by_id,
+            commands::create_debt_payment,
+            commands::update_debt_payment,
+            commands::delete_debt_payment,
+            commands::get_debt_payments,
+            commands::get_customers_with_debt,
+            commands::get_customer_debt_invoices,
             commands::get_permissions,
             commands::login,
+            commands::logout,
             commands::get_users,
             commands::create_user,
             commands::update_user,

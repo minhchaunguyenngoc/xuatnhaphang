@@ -17,6 +17,7 @@ import type {
   ProfitReport,
   Supplier,
   UpdateCustomer,
+  UpdateExportReceipt,
   UpdateImportReceipt,
   UpdateProduct,
   UpdateSupplier,
@@ -118,6 +119,8 @@ interface InventoryState {
     input: CreateExportReceipt,
     opts?: MutationOpts,
   ) => Promise<ExportReceipt>;
+  updateExportReceipt: (input: UpdateExportReceipt, opts?: MutationOpts) => Promise<void>;
+  deleteExportReceipt: (id: number) => Promise<void>;
 
   fetchDashboard: () => Promise<void>;
   fetchInventoryHistory: () => Promise<void>;
@@ -468,6 +471,36 @@ export const useInventoryStore = create<InventoryState>((set, get) => ({
       set({
         loading: false,
         error: getErrorMessage(error, "Không thể tạo phiếu xuất"),
+      });
+      throw error;
+    }
+  },
+
+  updateExportReceipt: async (input, opts) => {
+    set({ loading: true, error: null });
+    try {
+      await api.updateExportReceipt(input);
+      if (opts?.refetch) await get().fetchExportReceipts();
+      set({ loading: false });
+    } catch (error) {
+      set({
+        loading: false,
+        error: getErrorMessage(error, "Không thể sửa hoá đơn"),
+      });
+      throw error;
+    }
+  },
+
+  deleteExportReceipt: async (id) => {
+    set({ loading: true, error: null });
+    try {
+      await api.deleteExportReceipt(id);
+      await get().fetchExportReceipts();
+      set({ loading: false });
+    } catch (error) {
+      set({
+        loading: false,
+        error: getErrorMessage(error, "Không thể xoá hoá đơn"),
       });
       throw error;
     }

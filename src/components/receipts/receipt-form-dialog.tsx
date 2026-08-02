@@ -24,7 +24,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { formatCurrency, generateReceiptNumber, todayISO } from "@/lib/format";
 import { receiptItemSchema } from "@/lib/schemas";
-import type { ImportReceipt, Product } from "@/lib/types";
+import type { ExportReceipt, ImportReceipt, Product } from "@/lib/types";
 import { useInventoryStore } from "@/stores/inventory-store";
 
 const receiptFormSchema = z.object({
@@ -52,9 +52,11 @@ interface ReceiptFormDialogProps {
   partnerSearch: (query: string) => Promise<PartnerOption[]>;
   /** Danh sách dòng điền sẵn (vd. đọc từ file Excel) khi mở dialog. */
   initialItems?: { product_id: number; quantity: number; unit_price: number }[];
-  /** Có giá trị = đang sửa phiếu nhập này (chỉ áp dụng type="import"). Số
-   * phiếu giữ nguyên, không cho đổi. */
-  editingReceipt?: ImportReceipt | null;
+  /** Có giá trị = đang sửa phiếu này. Số phiếu giữ nguyên, không cho đổi. Với
+   * hoá đơn bán hàng, chỉ sửa được ngày/khách/mặt hàng/ghi chú ở đây — chiết
+   * khấu/số tiền đã thu/hình thức thanh toán giữ nguyên như lúc tạo, không
+   * đổi qua form này (đổi trạng thái thanh toán thuộc trang Công nợ riêng). */
+  editingReceipt?: ImportReceipt | ExportReceipt | null;
   onSubmit: (values: {
     receipt_number: string;
     date: string;
@@ -123,11 +125,21 @@ export function ReceiptFormDialog({
 
     async function load() {
       if (editingReceipt) {
+        // Đọc đúng cột theo loại phiếu — phiếu nhập gắn NCC (supplier), phiếu
+        // xuất gắn khách hàng (customer). Cùng 1 dialog dùng chung cho cả 2.
+        const partnerName =
+          type === "import"
+            ? (editingReceipt as ImportReceipt).supplier
+            : (editingReceipt as ExportReceipt).customer;
+        const partnerId =
+          type === "import"
+            ? (editingReceipt as ImportReceipt).supplier_id
+            : (editingReceipt as ExportReceipt).customer_id;
         reset({
           receipt_number: editingReceipt.receipt_number,
           date: editingReceipt.date,
-          partner: editingReceipt.supplier ?? "",
-          partner_id: editingReceipt.supplier_id ?? undefined,
+          partner: partnerName ?? "",
+          partner_id: partnerId ?? undefined,
           note: editingReceipt.note ?? "",
           items: editingReceipt.items.map((item) => ({
             product_id: item.product_id,
@@ -135,11 +147,7 @@ export function ReceiptFormDialog({
             unit_price: item.unit_price,
           })),
         });
-        setSelectedPartner(
-          editingReceipt.supplier_id
-            ? { id: editingReceipt.supplier_id, name: editingReceipt.supplier ?? "" }
-            : null,
-        );
+        setSelectedPartner(partnerId ? { id: partnerId, name: partnerName ?? "" } : null);
         const products = await Promise.all(
           editingReceipt.items.map((item) => api.getProductById(item.product_id)),
         );
@@ -187,7 +195,7 @@ export function ReceiptFormDialog({
     return () => {
       active = false;
     };
-  }, [open, prefix, initialItems, editingReceipt, reset]);
+  }, [open, type, prefix, initialItems, editingReceipt, reset]);
 
   const total = items.reduce(
     (sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unit_price) || 0),
@@ -200,7 +208,9 @@ export function ReceiptFormDialog({
         <DialogHeader>
           <DialogTitle>
             {editingReceipt
-              ? "Sửa phiếu nhập hàng"
+              ? type === "import"
+                ? "Sửa phiếu nhập hàng"
+                : "Sửa hoá đơn bán hàng"
               : type === "import"
                 ? "Tạo phiếu nhập hàng"
                 : "Tạo phiếu xuất hàng"}

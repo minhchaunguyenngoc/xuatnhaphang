@@ -17,6 +17,7 @@ import {
   Undo2,
   UserCog,
   Users,
+  Wallet,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -68,6 +69,7 @@ const navSections: NavSection[] = [
         icon: Undo2,
         permissions: ["returns.customer", "returns.supplier"],
       },
+      { href: "/debts", label: "Công nợ", icon: Wallet, permissions: ["debts.manage"] },
     ],
   },
   {
