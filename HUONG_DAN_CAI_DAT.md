@@ -2,6 +2,13 @@
 
 Phần mềm quản lý Nhập – Xuất hàng, chạy hoàn toàn trên máy tính của bạn (không cần internet, không lưu dữ liệu lên đâu khác).
 
+## Có gì mới trong bản 0.4.0
+
+- **Bán ghi nợ cho khách quen** — thêm hình thức thanh toán **"Công nợ"** lúc bán hàng, bên cạnh Tiền mặt và Chuyển khoản. Dùng khi khách chưa trả (hết) tiền ngay lúc mua — hệ thống tự ghi nhận đúng số tiền còn thiếu, không cần tự tính tay.
+- **Trang Công nợ mới** — xem toàn bộ khách hàng đang nợ, bấm vào từng khách để biết đúng hoá đơn nào còn nợ bao nhiêu. Khách trả dần từng đợt vẫn ghi nhận được (mỗi lần một số tiền khác nhau), và sửa/xoá được nếu lỡ ghi nhầm.
+- **Hiện ngay hoá đơn nào còn nợ trên trang Hoá đơn bán hàng** — thêm cột "Còn nợ", nhìn danh sách là biết ngay hoá đơn nào đã thu đủ tiền, hoá đơn nào còn thiếu bao nhiêu, không cần mở từng hoá đơn ra xem.
+- **Sửa và xoá được hoá đơn bán hàng** — trang Hoá đơn bán hàng giờ có nút Sửa (đổi ngày/khách/mặt hàng/ghi chú) và Xoá cho từng hoá đơn, tự khôi phục đúng lại tồn kho và công nợ như trước khi bán. Có 2 quyền riêng "Sửa hoá đơn bán hàng" / "Xoá hoá đơn bán hàng" ở trang Người dùng để cấp cho từng nhân viên.
+
 ## Có gì mới trong bản 0.3.2
 
 - **Sửa lỗi ô "Giá trị hàng trả" hiện sai khi trả hàng có chiết khấu** — trước đây khi tạo hoặc sửa phiếu trả cho đơn đã bớt giá, ô này hiện đúng giá niêm yết (chưa trừ chiết khấu) thay vì đúng số tiền đã trừ giảm giá cho khách. Số tiền thực lưu vào phiếu trả luôn đúng từ trước — đây chỉ là lỗi hiển thị lúc lập phiếu, không ảnh hưởng dữ liệu đã lưu.
