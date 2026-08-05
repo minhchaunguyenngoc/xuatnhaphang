@@ -322,10 +322,15 @@ export interface Permission {
   label: string;
 }
 
+// Trả nợ đã xác định gắn với 1 hoá đơn cụ thể, không dùng lại giá trị "debt"
+// của PaymentMethod (dành cho lúc bán hàng) — chỉ tiền mặt hoặc chuyển khoản.
+export type DebtPaymentMethod = Exclude<PaymentMethod, "debt">;
+
 export interface CreateDebtPayment {
   export_receipt_id: number;
   amount: number;
   date: string;
+  payment_method: DebtPaymentMethod;
   note?: string | null;
 }
 
@@ -333,6 +338,7 @@ export interface UpdateDebtPayment {
   id: number;
   amount: number;
   date: string;
+  payment_method: DebtPaymentMethod;
   note?: string | null;
 }
 
@@ -343,6 +349,7 @@ export interface DebtPayment {
   customer_id: number;
   amount: number;
   date: string;
+  payment_method: string;
   note: string | null;
   created_at: string;
 }

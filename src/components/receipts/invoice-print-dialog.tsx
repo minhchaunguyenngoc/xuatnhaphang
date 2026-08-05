@@ -101,7 +101,11 @@ export function InvoicePrintDialog({
     ? Math.max(exportReceipt.total_amount - exportReceipt.amount_paid, 0)
     : 0;
   const paymentMethodLabel =
-    exportReceipt?.payment_method === "transfer" ? "Chuyển khoản" : "Tiền mặt";
+    exportReceipt?.payment_method === "transfer"
+      ? "Chuyển khoản"
+      : exportReceipt?.payment_method === "debt"
+        ? "Công nợ"
+        : "Tiền mặt";
 
   const partnerLabel =
     type === "import" || type === "supplier_return" ? "Nhà cung cấp" : "Khách hàng";

@@ -26,7 +26,7 @@ store set state → re-render UI
 4. **Lợi nhuận kỳ:** tổng dòng − discount phiếu (phân bổ tỷ lệ trên report theo SP).
 5. **Trả KH:** restock batch + điều chỉnh debt/doanh thu report.
 6. **Trả NCC:** giảm tồn nếu lô còn; reject nếu đã bán hết batch.
-7. **Trả nợ (Debts):** `create/update/delete_debt_payment` cộng/trừ `export_receipts.amount_paid` và `customers.debt` cùng 1 transaction, gắn đúng 1 hoá đơn, clamp không vượt `remaining` của hoá đơn đó.
+7. **Trả nợ (Debts):** `create/update/delete_debt_payment` cộng/trừ `export_receipts.amount_paid` và `customers.debt` cùng 1 transaction, gắn đúng 1 hoá đơn, clamp không vượt `remaining` của hoá đơn đó. Mỗi lần trả lưu `payment_method` (`cash`/`transfer`, không nhận `debt`) — validate ở `create_debt_payment`/`update_debt_payment`.
 
 ## File “source of truth” theo loại thay đổi
 

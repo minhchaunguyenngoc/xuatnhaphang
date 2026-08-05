@@ -373,6 +373,7 @@ pub struct CreateDebtPayment {
     pub export_receipt_id: i64,
     pub amount: f64,
     pub date: String,
+    pub payment_method: String,
     pub note: Option<String>,
 }
 
@@ -381,6 +382,7 @@ pub struct UpdateDebtPayment {
     pub id: i64,
     pub amount: f64,
     pub date: String,
+    pub payment_method: String,
     pub note: Option<String>,
 }
 
@@ -392,6 +394,7 @@ pub struct DebtPayment {
     pub customer_id: i64,
     pub amount: f64,
     pub date: String,
+    pub payment_method: String,
     pub note: Option<String>,
     pub created_at: String,
 }

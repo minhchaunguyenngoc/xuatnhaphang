@@ -83,7 +83,7 @@ Public: create/update customer|supplier return, `delete_return_receipt`, `get_re
 | `return_receipts` / `return_items` | Trả hàng KH / NCC |
 | `inventory_history` | Lịch sử biến động / đổi giá |
 | `customers` / `suppliers` | Đối tác + `debt` |
-| `debt_payments` | Từng lần khách trả nợ, gắn 1 `export_receipt_id` cụ thể |
+| `debt_payments` | Từng lần khách trả nợ, gắn 1 `export_receipt_id` cụ thể + `payment_method` (`cash`/`transfer`) |
 | `users` / `user_permissions` | Auth local |
 | `audit_log` | Audit |
 
@@ -100,7 +100,7 @@ DB file: app data dir / `inventory.db` (local, single-user).
 | Sửa phiếu nhập | `update_import_receipt` — reject nếu batch đã bán |
 | Sửa/xoá phiếu xuất | `update_export_receipt`/`delete_export_receipt` — reject nếu đã có phiếu trả hàng dựa trên hoá đơn |
 | Reverse trả hàng | `reverse_return_effects` |
-| Trả nợ theo hoá đơn | `create/update/delete_debt_payment` — gắn đúng 1 `export_receipt_id`, clamp không vượt `remaining` |
+| Trả nợ theo hoá đơn | `create/update/delete_debt_payment` — gắn đúng 1 `export_receipt_id`, clamp không vượt `remaining`, `payment_method` chỉ `cash`/`transfer` |
 | Profit + discount + returns | `get_profit_report` |
 
 ## Tests nên chạy khi đụng hotspot

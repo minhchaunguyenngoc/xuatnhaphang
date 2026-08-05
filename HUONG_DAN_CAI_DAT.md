@@ -2,6 +2,11 @@
 
 Phần mềm quản lý Nhập – Xuất hàng, chạy hoàn toàn trên máy tính của bạn (không cần internet, không lưu dữ liệu lên đâu khác).
 
+## Có gì mới trong bản 0.4.1
+
+- **Chọn phương thức khi trả nợ** — trang Công nợ giờ cho chọn **Tiền mặt** hay **Chuyển khoản** mỗi lần ghi nhận khách trả nợ (kể cả khi sửa lại lần trả đã ghi), thay vì mặc định luôn tính là tiền mặt. Lịch sử trả nợ của từng hoá đơn cũng hiện rõ lần nào trả bằng gì.
+- **Sửa lỗi hoá đơn in ra hiện sai "Phương thức" khi bán ghi nợ** — hoá đơn bán theo hình thức Công nợ (khách chưa trả tiền) trước đây khi in ra vẫn hiện nhầm "Tiền mặt", giờ hiện đúng "Công nợ".
+
 ## Có gì mới trong bản 0.4.0
 
 - **Bán ghi nợ cho khách quen** — thêm hình thức thanh toán **"Công nợ"** lúc bán hàng, bên cạnh Tiền mặt và Chuyển khoản. Dùng khi khách chưa trả (hết) tiền ngay lúc mua — hệ thống tự ghi nhận đúng số tiền còn thiếu, không cần tự tính tay.

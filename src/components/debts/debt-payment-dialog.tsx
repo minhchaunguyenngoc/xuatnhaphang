@@ -15,6 +15,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -24,8 +31,13 @@ import {
 } from "@/components/ui/table";
 import { getErrorMessage } from "@/lib/errors";
 import { formatCurrency, formatDate, todayISO } from "@/lib/format";
-import type { CustomerDebtInvoice, DebtPayment } from "@/lib/types";
+import type { CustomerDebtInvoice, DebtPayment, DebtPaymentMethod } from "@/lib/types";
 import { useDebtsStore } from "@/stores/debts-store";
+
+const PAYMENT_METHOD_LABELS: Record<DebtPaymentMethod, string> = {
+  cash: "Tiền mặt",
+  transfer: "Chuyển khoản",
+};
 
 interface DebtPaymentDialogProps {
   open: boolean;
@@ -52,12 +64,14 @@ export function DebtPaymentDialog({
 
   const [amount, setAmount] = useState(invoice?.remaining ?? 0);
   const [date, setDate] = useState(todayISO());
+  const [method, setMethod] = useState<DebtPaymentMethod>("cash");
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editAmount, setEditAmount] = useState(0);
   const [editDate, setEditDate] = useState("");
+  const [editMethod, setEditMethod] = useState<DebtPaymentMethod>("cash");
   const [editNote, setEditNote] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -98,6 +112,7 @@ export function DebtPaymentDialog({
         export_receipt_id: invoice!.export_receipt_id,
         amount,
         date,
+        payment_method: method,
         note: note.trim() ? note : null,
       });
       toast.success("Đã ghi nhận trả nợ");
@@ -115,6 +130,7 @@ export function DebtPaymentDialog({
     setEditingId(p.id);
     setEditAmount(p.amount);
     setEditDate(p.date);
+    setEditMethod(p.payment_method === "transfer" ? "transfer" : "cash");
     setEditNote(p.note ?? "");
   }
 
@@ -130,6 +146,7 @@ export function DebtPaymentDialog({
         id: editingId,
         amount: editAmount,
         date: editDate,
+        payment_method: editMethod,
         note: editNote.trim() ? editNote : null,
       });
       toast.success("Đã lưu thay đổi");
@@ -184,7 +201,7 @@ export function DebtPaymentDialog({
 
           <div className="space-y-3 rounded-lg border p-4">
             <p className="text-sm font-medium">Ghi nhận trả nợ mới</p>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-4 gap-2">
               <div className="space-y-1">
                 <Label>Số tiền trả</Label>
                 <Input
@@ -198,6 +215,22 @@ export function DebtPaymentDialog({
               <div className="space-y-1">
                 <Label>Ngày trả</Label>
                 <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label>Phương thức</Label>
+                <Select
+                  items={PAYMENT_METHOD_LABELS}
+                  value={method}
+                  onValueChange={(v) => setMethod(v as DebtPaymentMethod)}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="cash">Tiền mặt</SelectItem>
+                    <SelectItem value="transfer">Chuyển khoản</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-1">
                 <Label>Ghi chú</Label>
@@ -221,6 +254,7 @@ export function DebtPaymentDialog({
                   <TableRow>
                     <TableHead>Ngày</TableHead>
                     <TableHead className="text-right">Số tiền</TableHead>
+                    <TableHead>Phương thức</TableHead>
                     <TableHead>Ghi chú</TableHead>
                     <TableHead className="text-right">Thao tác</TableHead>
                   </TableRow>
@@ -228,13 +262,13 @@ export function DebtPaymentDialog({
                 <TableBody>
                   {loadingPayments ? (
                     <TableRow>
-                      <TableCell colSpan={4} className="py-6 text-center text-muted-foreground">
+                      <TableCell colSpan={5} className="py-6 text-center text-muted-foreground">
                         Đang tải...
                       </TableCell>
                     </TableRow>
                   ) : payments.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={4} className="py-6 text-center text-muted-foreground">
+                      <TableCell colSpan={5} className="py-6 text-center text-muted-foreground">
                         Chưa có lần trả nợ nào.
                       </TableCell>
                     </TableRow>
@@ -258,6 +292,21 @@ export function DebtPaymentDialog({
                               value={editAmount}
                               onChange={(e) => setEditAmount(Number(e.target.value) || 0)}
                             />
+                          </TableCell>
+                          <TableCell>
+                            <Select
+                              items={PAYMENT_METHOD_LABELS}
+                              value={editMethod}
+                              onValueChange={(v) => setEditMethod(v as DebtPaymentMethod)}
+                            >
+                              <SelectTrigger className="h-8 w-full">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="cash">Tiền mặt</SelectItem>
+                                <SelectItem value="transfer">Chuyển khoản</SelectItem>
+                              </SelectContent>
+                            </Select>
                           </TableCell>
                           <TableCell>
                             <Input
@@ -284,6 +333,9 @@ export function DebtPaymentDialog({
                         <TableRow key={p.id}>
                           <TableCell>{formatDate(p.date)}</TableCell>
                           <TableCell className="text-right">{formatCurrency(p.amount)}</TableCell>
+                          <TableCell>
+                            {p.payment_method === "transfer" ? "Chuyển khoản" : "Tiền mặt"}
+                          </TableCell>
                           <TableCell className="max-w-40 truncate">{p.note ?? "-"}</TableCell>
                           <TableCell className="text-right">
                             <Button

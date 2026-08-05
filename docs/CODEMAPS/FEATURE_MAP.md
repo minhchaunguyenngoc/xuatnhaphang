@@ -93,7 +93,7 @@ Quy ước cột:
 | Tables | `debt_payments`, `export_receipts` (`amount_paid`), `customers` (`debt`) |
 | Permission | `debts.manage` (`auth.rs` PERMISSION_KEYS) |
 
-**Quy tắc:** trả nợ gắn vào ĐÚNG 1 hoá đơn (`export_receipt_id`), không tự chia FIFO qua nhiều hoá đơn; cộng/trừ `export_receipts.amount_paid` và `customers.debt` luôn cùng 1 transaction; sửa/xoá lần trả phải gỡ tác động cũ trước khi áp lại (xem test `update_debt_payment`/`delete_debt_payment_restores_debt` trong `db.rs`).
+**Quy tắc:** trả nợ gắn vào ĐÚNG 1 hoá đơn (`export_receipt_id`), không tự chia FIFO qua nhiều hoá đơn; cộng/trừ `export_receipts.amount_paid` và `customers.debt` luôn cùng 1 transaction; sửa/xoá lần trả phải gỡ tác động cũ trước khi áp lại (xem test `update_debt_payment`/`delete_debt_payment_restores_debt` trong `db.rs`). Mỗi lần trả có `payment_method` (`cash`/`transfer` — không nhận `debt`), validate ở backend.
 
 ---
 

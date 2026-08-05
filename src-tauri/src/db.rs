@@ -262,10 +262,17 @@ impl Database {
                 customer_id INTEGER NOT NULL REFERENCES customers(id),
                 amount REAL NOT NULL,
                 date TEXT NOT NULL,
+                payment_method TEXT NOT NULL DEFAULT 'cash',
                 note TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
             ",
+        )?;
+        Self::add_column_if_missing(
+            &conn,
+            "debt_payments",
+            "payment_method",
+            "TEXT NOT NULL DEFAULT 'cash'",
         )?;
 
         Self::migrate_export_items_cost_price(&conn)?;
@@ -2772,7 +2779,7 @@ impl Database {
     fn get_debt_payment(&self, id: i64) -> SqlResult<DebtPayment> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT dp.id, dp.export_receipt_id, er.receipt_number, dp.customer_id, dp.amount, dp.date, dp.note, dp.created_at
+            "SELECT dp.id, dp.export_receipt_id, er.receipt_number, dp.customer_id, dp.amount, dp.date, dp.payment_method, dp.note, dp.created_at
              FROM debt_payments dp
              JOIN export_receipts er ON er.id = dp.export_receipt_id
              WHERE dp.id = ?1",
@@ -2785,8 +2792,9 @@ impl Database {
                     customer_id: row.get(3)?,
                     amount: row.get(4)?,
                     date: row.get(5)?,
-                    note: row.get(6)?,
-                    created_at: row.get(7)?,
+                    payment_method: row.get(6)?,
+                    note: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             },
         )
@@ -2803,6 +2811,11 @@ impl Database {
         }
         if input.date.trim().is_empty() {
             return Err(app_err("Ngày trả không được để trống."));
+        }
+        if input.payment_method != "cash" && input.payment_method != "transfer" {
+            return Err(app_err(
+                "Phương thức thanh toán không hợp lệ (chỉ tiền mặt hoặc chuyển khoản).",
+            ));
         }
 
         let mut conn = self.conn.lock().unwrap();
@@ -2825,13 +2838,14 @@ impl Database {
         }
 
         tx.execute(
-            "INSERT INTO debt_payments (export_receipt_id, customer_id, amount, date, note)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO debt_payments (export_receipt_id, customer_id, amount, date, payment_method, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 input.export_receipt_id,
                 customer_id,
                 input.amount,
                 input.date,
+                input.payment_method,
                 input.note
             ],
         )?;
@@ -2863,6 +2877,11 @@ impl Database {
         }
         if input.date.trim().is_empty() {
             return Err(app_err("Ngày trả không được để trống."));
+        }
+        if input.payment_method != "cash" && input.payment_method != "transfer" {
+            return Err(app_err(
+                "Phương thức thanh toán không hợp lệ (chỉ tiền mặt hoặc chuyển khoản).",
+            ));
         }
 
         let mut conn = self.conn.lock().unwrap();
@@ -2898,8 +2917,14 @@ impl Database {
         }
 
         tx.execute(
-            "UPDATE debt_payments SET amount = ?1, date = ?2, note = ?3 WHERE id = ?4",
-            params![input.amount, input.date, input.note, input.id],
+            "UPDATE debt_payments SET amount = ?1, date = ?2, payment_method = ?3, note = ?4 WHERE id = ?5",
+            params![
+                input.amount,
+                input.date,
+                input.payment_method,
+                input.note,
+                input.id
+            ],
         )?;
         tx.execute(
             "UPDATE export_receipts SET amount_paid = amount_paid + ?1 WHERE id = ?2",
@@ -2945,7 +2970,7 @@ impl Database {
     pub fn get_debt_payments(&self, export_receipt_id: i64) -> SqlResult<Vec<DebtPayment>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT dp.id, dp.export_receipt_id, er.receipt_number, dp.customer_id, dp.amount, dp.date, dp.note, dp.created_at
+            "SELECT dp.id, dp.export_receipt_id, er.receipt_number, dp.customer_id, dp.amount, dp.date, dp.payment_method, dp.note, dp.created_at
              FROM debt_payments dp
              JOIN export_receipts er ON er.id = dp.export_receipt_id
              WHERE dp.export_receipt_id = ?1
@@ -2960,8 +2985,9 @@ impl Database {
                     customer_id: row.get(3)?,
                     amount: row.get(4)?,
                     date: row.get(5)?,
-                    note: row.get(6)?,
-                    created_at: row.get(7)?,
+                    payment_method: row.get(6)?,
+                    note: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             })?
             .collect::<SqlResult<Vec<_>>>()?;
@@ -4322,6 +4348,7 @@ mod tests {
                 export_receipt_id: sale.id,
                 amount: 200.0,
                 date: "2026-01-05".into(),
+                payment_method: "cash".into(),
                 note: None,
             })
             .unwrap();
@@ -4342,6 +4369,7 @@ mod tests {
             export_receipt_id: sale.id,
             amount: 300.0,
             date: "2026-01-06".into(),
+            payment_method: "transfer".into(),
             note: None,
         })
         .unwrap();
@@ -4387,6 +4415,7 @@ mod tests {
             export_receipt_id: sale.id,
             amount: 600.0,
             date: "2026-01-05".into(),
+            payment_method: "cash".into(),
             note: None,
         });
         assert!(
@@ -4433,6 +4462,7 @@ mod tests {
                 export_receipt_id: sale.id,
                 amount: 100.0,
                 date: "2026-01-05".into(),
+                payment_method: "cash".into(),
                 note: None,
             })
             .unwrap();
@@ -4443,6 +4473,7 @@ mod tests {
             id: payment.id,
             amount: 300.0,
             date: "2026-01-05".into(),
+            payment_method: "transfer".into(),
             note: None,
         })
         .unwrap();
@@ -4457,6 +4488,7 @@ mod tests {
             id: payment.id,
             amount: 600.0,
             date: "2026-01-05".into(),
+            payment_method: "transfer".into(),
             note: None,
         });
         assert!(res.is_err());
@@ -4500,6 +4532,7 @@ mod tests {
                 export_receipt_id: sale.id,
                 amount: 200.0,
                 date: "2026-01-05".into(),
+                payment_method: "cash".into(),
                 note: None,
             })
             .unwrap();
@@ -4514,6 +4547,64 @@ mod tests {
             db.get_debt_payments(sale.id).unwrap().len(),
             0,
             "lần trả nợ đã xoá phải biến mất khỏi lịch sử"
+        );
+    }
+
+    #[test]
+    fn debt_payment_persists_payment_method_and_rejects_invalid_value() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 10.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            Some(c),
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+
+        let payment = db
+            .create_debt_payment(CreateDebtPayment {
+                export_receipt_id: sale.id,
+                amount: 200.0,
+                date: "2026-01-05".into(),
+                payment_method: "transfer".into(),
+                note: None,
+            })
+            .unwrap();
+        assert_eq!(payment.payment_method, "transfer");
+        assert_eq!(
+            db.get_debt_payments(sale.id).unwrap()[0].payment_method,
+            "transfer"
+        );
+
+        let res = db.create_debt_payment(CreateDebtPayment {
+            export_receipt_id: sale.id,
+            amount: 100.0,
+            date: "2026-01-05".into(),
+            payment_method: "debt".into(),
+            note: None,
+        });
+        assert!(
+            res.is_err(),
+            "phương thức thanh toán trả nợ chỉ chấp nhận tiền mặt hoặc chuyển khoản"
         );
     }
 
