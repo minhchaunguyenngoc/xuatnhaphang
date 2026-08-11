@@ -35,7 +35,7 @@ fn validate_receipt_header(receipt_number: &str, date: &str, item_count: usize) 
 
 /// Phiên bản schema, lưu trong `PRAGMA user_version`. Tăng số này khi thêm một
 /// bước backfill mới cần chạy lại trên CSDL đã có dữ liệu.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Cận cho tìm theo TIỀN TỐ: mọi chuỗi bắt đầu bằng `prefix` đều nằm trong nửa
 /// khoảng `[prefix, cận_trên)`.
@@ -333,6 +333,7 @@ impl Database {
             )?;
             Self::backfill_batches_for_existing_stock(&conn)?;
             Self::backfill_return_reversal_columns(&conn)?;
+            Self::backfill_last_known_cost(&conn)?;
             conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         }
 
@@ -501,6 +502,37 @@ impl Database {
         Ok(())
     }
 
+    /// Khôi phục giá vốn lần cuối cho các sản phẩm ĐÃ BÁN HẾT TỒN mà bị
+    /// `recompute_avg_cost` bản cũ đưa `import_price` về 0 (Issue 18).
+    ///
+    /// Ưu tiên lấy giá của LÔ NHẬP gần nhất; lô đã tiêu thụ hết vẫn nằm lại
+    /// trong `product_batches` (remaining_quantity = 0) nên vẫn tra được. Phiếu
+    /// nhập bị xoá thì lô cũng mất theo — khi đó lấy `cost_price` của dòng xuất
+    /// gần nhất, vốn là giá vốn FIFO thực tế đã ghi lúc bán.
+    ///
+    /// Chỉ đụng tới sản phẩm tồn = 0: còn tồn thì `import_price` đang là giá vốn
+    /// bình quân đúng của các lô còn lại, ghi đè bằng giá lô cũ sẽ làm sai định
+    /// giá kho.
+    fn backfill_last_known_cost(conn: &Connection) -> SqlResult<()> {
+        conn.execute(
+            "UPDATE products SET import_price = COALESCE(
+                 (SELECT b.cost_price FROM product_batches b
+                  WHERE b.product_id = products.id AND b.cost_price > 0
+                  ORDER BY COALESCE(b.import_date, date(b.created_at)) DESC, b.id DESC
+                  LIMIT 1),
+                 (SELECT ei.cost_price FROM export_items ei
+                  JOIN export_receipts er ON er.id = ei.receipt_id
+                  WHERE ei.product_id = products.id AND ei.cost_price > 0
+                  ORDER BY er.date DESC, ei.id DESC
+                  LIMIT 1),
+                 import_price
+             )
+             WHERE import_price = 0 AND stock_quantity <= 0",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Consumes stock FIFO across open batches for `product_id` and returns the
     /// total cost of the quantity consumed (unit cost = total / quantity).
     fn consume_batches_fifo(
@@ -557,18 +589,27 @@ impl Database {
     }
 
     /// Tính lại giá vốn bình quân (`products.import_price`) từ các lô còn tồn sau
-    /// khi xuất FIFO (Issue 5). Hết lô → 0 để không định giá tồn sai.
+    /// khi xuất FIFO (Issue 5).
+    ///
+    /// BÁN HẾT TỒN thì GIỮ NGUYÊN giá vốn cũ, không đưa về 0 (Issue 18). Trước
+    /// đây cột "Giá nhập" ở trang Hàng hoá tụt về 0 ngay khi lô cuối bán hết —
+    /// người dùng đọc thành "mất giá nhập đã khai", dù giá vốn thật vẫn nằm
+    /// nguyên trong `export_items.cost_price` nên báo cáo lợi nhuận vẫn đúng.
+    /// Giữ lại giá vốn lần cuối để còn tham chiếu khi nhập/báo giá lại; định giá
+    /// tồn kho không bị ảnh hưởng vì tồn = 0 thì `stock * import_price` = 0.
     fn recompute_avg_cost(tx: &rusqlite::Transaction, product_id: i64) -> SqlResult<()> {
-        let avg_cost: f64 = tx.query_row(
-            "SELECT COALESCE(SUM(remaining_quantity * cost_price) / NULLIF(SUM(remaining_quantity), 0), 0)
+        let avg_cost: Option<f64> = tx.query_row(
+            "SELECT SUM(remaining_quantity * cost_price) / NULLIF(SUM(remaining_quantity), 0)
              FROM product_batches WHERE product_id = ?1 AND remaining_quantity > 0",
             params![product_id],
             |row| row.get(0),
         )?;
-        tx.execute(
-            "UPDATE products SET import_price = ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
-            params![avg_cost, product_id],
-        )?;
+        if let Some(avg_cost) = avg_cost {
+            tx.execute(
+                "UPDATE products SET import_price = ?1, updated_at = datetime('now', 'localtime') WHERE id = ?2",
+                params![avg_cost, product_id],
+            )?;
+        }
         Ok(())
     }
 
@@ -3531,6 +3572,122 @@ impl Database {
         })
     }
 
+    /// Lợi nhuận GOM THEO HOÁ ĐƠN (song song với `get_profit_report` gom theo
+    /// sản phẩm). Cùng một kỳ, tổng của hai báo cáo phải khớp nhau.
+    ///
+    /// - Doanh thu phiếu = `export_receipts.total_amount` (đã trừ chiết khấu và
+    ///   đã bị kẹp về `[0, items_total]` lúc lập phiếu) — cùng nguồn số mà báo
+    ///   cáo theo sản phẩm dùng để phân bổ chiết khấu, nên hai bên không lệch.
+    /// - Hàng khách trả được trừ vào CHÍNH hoá đơn gốc, không phụ thuộc ngày lập
+    ///   phiếu trả: mỗi dòng phản ánh kết quả cuối cùng của hoá đơn đó.
+    ///   `return_items.unit_price` đã trừ sẵn chiết khấu của phiếu gốc.
+    /// - `customer_id = None` → toàn bộ khách.
+    pub fn get_receipt_profit_report(
+        &self,
+        from: &str,
+        to: &str,
+        customer_id: Option<i64>,
+    ) -> SqlResult<ReceiptProfitReport> {
+        let conn = self.conn.lock().unwrap();
+        // Lọc khách ghép thẳng vào SQL (không lọc ở Rust) để phiếu ngoài phạm vi
+        // không bao giờ được đọc lên — cửa hàng nhiều năm dữ liệu thì đây là
+        // khác biệt giữa vài mili giây và vài giây.
+        let customer_sql = if customer_id.is_some() {
+            "AND er.customer_id = ?3"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT er.id, er.receipt_number, er.date, er.customer, er.customer_id,
+                    COALESCE(it.items_total, 0) AS items_total,
+                    er.total_amount,
+                    COALESCE(it.cost_total, 0) AS cost_total,
+                    COALESCE(rt.ret_revenue, 0) AS ret_revenue,
+                    COALESCE(rt.ret_cost, 0) AS ret_cost
+             FROM export_receipts er
+             LEFT JOIN (SELECT receipt_id,
+                               SUM(total_price) AS items_total,
+                               SUM(quantity * cost_price) AS cost_total
+                        FROM export_items GROUP BY receipt_id) it ON it.receipt_id = er.id
+             LEFT JOIN (SELECT rr.original_receipt_id AS receipt_id,
+                               SUM(ri.total_price) AS ret_revenue,
+                               SUM(ri.quantity * ri.cost_price) AS ret_cost
+                        FROM return_items ri
+                        JOIN return_receipts rr ON rr.id = ri.return_id
+                        WHERE rr.return_type = 'customer'
+                        GROUP BY rr.original_receipt_id) rt ON rt.receipt_id = er.id
+             WHERE er.date BETWEEN ?1 AND ?2 {customer_sql}
+             ORDER BY er.date DESC, er.id DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+
+        let map_row = |row: &rusqlite::Row| -> SqlResult<ReceiptProfitRow> {
+            let items_total: f64 = row.get(5)?;
+            let total_amount: f64 = row.get(6)?;
+            let cost_total: f64 = row.get(7)?;
+            let returned_revenue: f64 = row.get(8)?;
+            let returned_cost: f64 = row.get(9)?;
+
+            let revenue = total_amount - returned_revenue;
+            let cost = cost_total - returned_cost;
+            let profit = revenue - cost;
+            // Biên LN chỉ có nghĩa khi còn doanh thu dương; hoá đơn bị trả hết
+            // hàng (doanh thu 0) hiển thị 0% thay vì một con số vô hạn.
+            let margin_percent = if revenue > 0.0 {
+                profit / revenue * 100.0
+            } else {
+                0.0
+            };
+
+            Ok(ReceiptProfitRow {
+                receipt_id: row.get(0)?,
+                receipt_number: row.get(1)?,
+                date: row.get(2)?,
+                customer: row.get(3)?,
+                customer_id: row.get(4)?,
+                items_total,
+                discount: items_total - total_amount,
+                returned_revenue,
+                revenue,
+                cost,
+                profit,
+                margin_percent,
+            })
+        };
+
+        let by_receipt: Vec<ReceiptProfitRow> = match customer_id {
+            Some(id) => stmt
+                .query_map(params![from, to, id], map_row)?
+                .collect::<SqlResult<Vec<_>>>()?,
+            None => stmt
+                .query_map(params![from, to], map_row)?
+                .collect::<SqlResult<Vec<_>>>()?,
+        };
+
+        let total_revenue: f64 = by_receipt.iter().map(|r| r.revenue).sum();
+        let total_cost: f64 = by_receipt.iter().map(|r| r.cost).sum();
+        let total_discount: f64 = by_receipt.iter().map(|r| r.discount).sum();
+        let total_returned: f64 = by_receipt.iter().map(|r| r.returned_revenue).sum();
+        let total_profit = total_revenue - total_cost;
+        let margin_percent = if total_revenue > 0.0 {
+            total_profit / total_revenue * 100.0
+        } else {
+            0.0
+        };
+
+        Ok(ReceiptProfitReport {
+            from_date: from.to_string(),
+            to_date: to.to_string(),
+            total_revenue,
+            total_cost,
+            total_profit,
+            total_discount,
+            total_returned,
+            margin_percent,
+            by_receipt,
+        })
+    }
+
     pub fn get_inventory_history(&self) -> SqlResult<Vec<InventoryHistory>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -3742,6 +3899,221 @@ mod tests {
         assert_eq!(stock(&db, p), 10);
         // Giá vốn BQ tính lại từ lô còn lại (@20).
         assert!((avg_cost(&db, p) - 20.0).abs() < 1e-9);
+    }
+
+    // Issue 18: bán hết lô thì GIỮ giá vốn lần cuối, không tụt về 0 — nếu không
+    // cột "Giá nhập" ở trang Hàng hoá trông như bị mất dữ liệu.
+    #[test]
+    fn avg_cost_kept_when_stock_runs_out() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 5, 30.0);
+        export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(stock(&db, p), 0);
+        assert!(
+            (avg_cost(&db, p) - 30.0).abs() < 1e-9,
+            "hết lô phải giữ giá vốn cuối cùng, không về 0"
+        );
+        // Định giá tồn kho không bị thổi phồng: tồn = 0 nên giá trị kho = 0.
+        assert!(db.get_dashboard_stats().unwrap().total_stock_value.abs() < 1e-9);
+
+        // Nhập lô mới giá khác → giá vốn phải theo lô mới, không kẹt ở giá cũ.
+        import(&db, "PN2", "2026-01-03", p, 2, 50.0);
+        assert!((avg_cost(&db, p) - 50.0).abs() < 1e-9);
+    }
+
+    // Issue 18: migration khôi phục giá vốn cho CSDL cũ đã bị ghi 0.
+    #[test]
+    fn backfill_restores_last_known_cost() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 5, 30.0);
+        export_items(
+            &db,
+            "HD1",
+            "2026-01-02",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p,
+                quantity: 5,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+
+        // Dựng lại đúng trạng thái dữ liệu do bản cũ để lại: giá nhập bị ghi 0.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE products SET import_price = 0", []).unwrap();
+            Database::backfill_last_known_cost(&conn).unwrap();
+        }
+        assert!((avg_cost(&db, p) - 30.0).abs() < 1e-9);
+    }
+
+    // Backfill không được đụng vào sản phẩm CÒN TỒN: giá vốn hiện tại của lô
+    // còn lại mới là số đúng để định giá kho.
+    #[test]
+    fn backfill_skips_products_still_in_stock() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 5, 30.0);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE products SET import_price = 0", []).unwrap();
+            Database::backfill_last_known_cost(&conn).unwrap();
+        }
+        assert!(avg_cost(&db, p).abs() < 1e-9, "còn tồn thì backfill phải bỏ qua");
+    }
+
+    // Báo cáo theo hoá đơn và theo sản phẩm phải ra CÙNG một tổng cho một kỳ,
+    // kể cả khi có chiết khấu phiếu và hàng khách trả lại.
+    #[test]
+    fn receipt_profit_report_totals_match_product_report() {
+        let db = Database::new_memory();
+        let p1 = product(&db, "P1", 100.0);
+        let p2 = product(&db, "P2", 200.0);
+        import(&db, "PN1", "2026-01-01", p1, 10, 40.0);
+        import(&db, "PN2", "2026-01-01", p2, 10, 80.0);
+
+        // HD1: 2 dòng, chiết khấu phiếu 100.
+        let sale = export_items(
+            &db,
+            "HD1",
+            "2026-01-05",
+            None,
+            100.0,
+            0.0,
+            vec![
+                ExportItemInput {
+                    product_id: p1,
+                    quantity: 3,
+                    unit_price: 100.0,
+                },
+                ExportItemInput {
+                    product_id: p2,
+                    quantity: 2,
+                    unit_price: 200.0,
+                },
+            ],
+        )
+        .unwrap();
+        // HD2: không chiết khấu.
+        export_items(
+            &db,
+            "HD2",
+            "2026-01-06",
+            None,
+            0.0,
+            0.0,
+            vec![ExportItemInput {
+                product_id: p1,
+                quantity: 1,
+                unit_price: 100.0,
+            }],
+        )
+        .unwrap();
+        // Khách trả 1 cái của HD1.
+        db.create_customer_return(CreateCustomerReturn {
+            receipt_number: "PT1".into(),
+            original_receipt_id: sale.id,
+            date: "2026-01-07".into(),
+            note: None,
+            items: vec![ReturnItemInput {
+                original_item_id: sale.items[0].id,
+                product_id: p1,
+                quantity: 1,
+            }],
+        })
+        .unwrap();
+
+        let by_product = db.get_profit_report("2026-01-01", "2026-01-31").unwrap();
+        let by_receipt = db
+            .get_receipt_profit_report("2026-01-01", "2026-01-31", None)
+            .unwrap();
+
+        assert_eq!(by_receipt.by_receipt.len(), 2);
+        assert!(
+            (by_receipt.total_revenue - by_product.total_revenue).abs() < 1e-6,
+            "doanh thu 2 báo cáo phải khớp: {} vs {}",
+            by_receipt.total_revenue,
+            by_product.total_revenue
+        );
+        assert!((by_receipt.total_cost - by_product.total_cost).abs() < 1e-6);
+        assert!((by_receipt.total_profit - by_product.total_profit).abs() < 1e-6);
+        assert!(
+            (by_receipt.total_discount - 100.0).abs() < 1e-6,
+            "phải cộng đúng chiết khấu phiếu"
+        );
+
+        // Mới nhất lên đầu.
+        assert_eq!(by_receipt.by_receipt[0].receipt_number, "HD2");
+        let hd1 = by_receipt
+            .by_receipt
+            .iter()
+            .find(|r| r.receipt_number == "HD1")
+            .unwrap();
+        // items_total = 3*100 + 2*200 = 700; total_amount = 600.
+        assert!((hd1.items_total - 700.0).abs() < 1e-6);
+        assert!((hd1.discount - 100.0).abs() < 1e-6);
+        // Trả 1 cái P1 theo giá đã trừ chiết khấu: 100 * 600/700.
+        assert!((hd1.returned_revenue - 100.0 * 600.0 / 700.0).abs() < 1e-6);
+        assert!((hd1.revenue - (600.0 - 100.0 * 600.0 / 700.0)).abs() < 1e-6);
+        // Giá vốn: 3*40 + 2*80 = 280, trừ 1 cái trả lại @40.
+        assert!((hd1.cost - 240.0).abs() < 1e-6);
+    }
+
+    // Lọc theo khách chỉ trả hoá đơn của đúng khách đó.
+    #[test]
+    fn receipt_profit_report_filters_by_customer() {
+        let db = Database::new_memory();
+        let p = product(&db, "P1", 100.0);
+        import(&db, "PN1", "2026-01-01", p, 10, 40.0);
+        let c = db
+            .create_customer(CreateCustomer {
+                code: "KH1".into(),
+                name: "Khach 1".into(),
+                phone: None,
+                address: None,
+                note: None,
+            })
+            .unwrap()
+            .id;
+        let line = |qty| ExportItemInput {
+            product_id: p,
+            quantity: qty,
+            unit_price: 100.0,
+        };
+        export_items(&db, "HD1", "2026-01-05", Some(c), 0.0, 0.0, vec![line(2)]).unwrap();
+        export_items(&db, "HD2", "2026-01-06", None, 0.0, 0.0, vec![line(1)]).unwrap();
+
+        let all = db
+            .get_receipt_profit_report("2026-01-01", "2026-01-31", None)
+            .unwrap();
+        assert_eq!(all.by_receipt.len(), 2);
+
+        let mine = db
+            .get_receipt_profit_report("2026-01-01", "2026-01-31", Some(c))
+            .unwrap();
+        assert_eq!(mine.by_receipt.len(), 1);
+        assert_eq!(mine.by_receipt[0].receipt_number, "HD1");
+        assert!((mine.total_revenue - 200.0).abs() < 1e-6);
+        assert!((mine.total_profit - 120.0).abs() < 1e-6);
     }
 
     // Issue 1: tender > total, có khách → công nợ KHÔNG bị trừ.

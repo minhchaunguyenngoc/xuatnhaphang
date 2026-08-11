@@ -2,6 +2,11 @@
 
 Phần mềm quản lý Nhập – Xuất hàng, chạy hoàn toàn trên máy tính của bạn (không cần internet, không lưu dữ liệu lên đâu khác).
 
+## Có gì mới trong bản 0.4.2
+
+- **Báo cáo lợi nhuận theo hoá đơn** — trang Báo cáo có thêm bảng xem lãi/lỗ của **từng hoá đơn bán**, bên cạnh bảng theo sản phẩm đã có. Mỗi dòng là một hoá đơn với doanh thu, giá vốn, lợi nhuận và biên lợi nhuận; bấm vào dòng để xem chi tiết từng mặt hàng trong hoá đơn đó. Lọc được theo khách hàng, sắp xếp được theo lợi nhuận cao/thấp để thấy ngay hoá đơn nào lời nhất. Bảng hiện rõ cả phần chiết khấu đã bớt cho khách và giá trị hàng khách trả lại, để hiểu vì sao lợi nhuận của hoá đơn giảm.
+- **Sửa lỗi cột "Giá nhập" về 0 sau khi bán hết hàng** — trước đây khi một mặt hàng bán hết sạch tồn kho, cột **Giá nhập** ở trang Hàng hoá tụt về **0 đ**, trông như mất giá đã khai lúc nhập. Giờ phần mềm giữ lại giá vốn của lần nhập cuối cùng để bạn còn tham chiếu khi nhập lại hoặc báo giá. Các mặt hàng đang bị hiện 0 sẽ **tự động được khôi phục giá** ngay lần đầu mở bản này. Lưu ý: báo cáo lợi nhuận từ trước tới nay vẫn luôn đúng, lỗi chỉ nằm ở chỗ hiển thị cột Giá nhập.
+
 ## Có gì mới trong bản 0.4.1
 
 - **Chọn phương thức khi trả nợ** — trang Công nợ giờ cho chọn **Tiền mặt** hay **Chuyển khoản** mỗi lần ghi nhận khách trả nợ (kể cả khi sửa lại lần trả đã ghi), thay vì mặc định luôn tính là tiền mặt. Lịch sử trả nợ của từng hoá đơn cũng hiện rõ lần nào trả bằng gì.

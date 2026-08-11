@@ -72,6 +72,7 @@ pub fn run() {
             commands::get_dashboard_stats,
             commands::get_inventory_history,
             commands::get_profit_report,
+            commands::get_receipt_profit_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

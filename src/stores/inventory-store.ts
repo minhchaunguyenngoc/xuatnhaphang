@@ -15,6 +15,7 @@ import type {
   ListQuery,
   Product,
   ProfitReport,
+  ReceiptProfitReport,
   Supplier,
   UpdateCustomer,
   UpdateExportReceipt,
@@ -83,6 +84,7 @@ interface InventoryState {
   dashboardStats: DashboardStats | null;
   inventoryHistory: InventoryHistory[];
   profitReport: ProfitReport | null;
+  receiptProfitReport: ReceiptProfitReport | null;
   loading: boolean;
   error: string | null;
 
@@ -125,6 +127,11 @@ interface InventoryState {
   fetchDashboard: () => Promise<void>;
   fetchInventoryHistory: () => Promise<void>;
   fetchProfitReport: (from: string, to: string) => Promise<void>;
+  fetchReceiptProfitReport: (
+    from: string,
+    to: string,
+    customerId: number | null,
+  ) => Promise<void>;
 }
 
 const emptyStats: DashboardStats = {
@@ -166,6 +173,7 @@ export const useInventoryStore = create<InventoryState>((set, get) => ({
   dashboardStats: null,
   inventoryHistory: [],
   profitReport: null,
+  receiptProfitReport: null,
   loading: false,
   error: null,
 
@@ -539,6 +547,26 @@ export const useInventoryStore = create<InventoryState>((set, get) => ({
         loading: false,
         error:
           getErrorMessage(error, "Không thể tải báo cáo lợi nhuận"),
+      });
+    }
+  },
+
+  fetchReceiptProfitReport: async (from, to, customerId) => {
+    set({ loading: true, error: null });
+    try {
+      const receiptProfitReport = await api.getReceiptProfitReport(
+        from,
+        to,
+        customerId,
+      );
+      set({ receiptProfitReport, loading: false });
+    } catch (error) {
+      set({
+        loading: false,
+        error: getErrorMessage(
+          error,
+          "Không thể tải báo cáo lợi nhuận theo hoá đơn",
+        ),
       });
     }
   },

@@ -21,9 +21,9 @@ store set state → re-render UI
 ## FIFO / profit (tóm tắt — chi tiết trong CLAUDE.md)
 
 1. **Nhập:** tạo `product_batches` (qty, remaining, cost, import_date); cập nhật avg `products.import_price`.
-2. **Xuất:** `consume_batches_fifo` theo `import_date`; ghi `export_items.cost_price`; `recompute_avg_cost`.
+2. **Xuất:** `consume_batches_fifo` theo `import_date`; ghi `export_items.cost_price`; `recompute_avg_cost` (hết lô → giữ giá vốn cuối, không về 0).
 3. **Lợi nhuận dòng:** `(unit_price - cost_price) * qty`.
-4. **Lợi nhuận kỳ:** tổng dòng − discount phiếu (phân bổ tỷ lệ trên report theo SP).
+4. **Lợi nhuận kỳ:** tổng dòng − discount phiếu (phân bổ tỷ lệ trên report theo SP; report theo hoá đơn trừ 1 lần trên `total_amount`). Hai report phải ra cùng tổng.
 5. **Trả KH:** restock batch + điều chỉnh debt/doanh thu report.
 6. **Trả NCC:** giảm tồn nếu lô còn; reject nếu đã bán hết batch.
 7. **Trả nợ (Debts):** `create/update/delete_debt_payment` cộng/trừ `export_receipts.amount_paid` và `customers.debt` cùng 1 transaction, gắn đúng 1 hoá đơn, clamp không vượt `remaining` của hoá đơn đó. Mỗi lần trả lưu `payment_method` (`cash`/`transfer`, không nhận `debt`) — validate ở `create_debt_payment`/`update_debt_payment`.

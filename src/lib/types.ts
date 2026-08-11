@@ -245,6 +245,36 @@ export interface ProfitReport {
   by_product: ProductProfitRow[];
 }
 
+/** Một dòng = một hoá đơn bán, đã trừ chiết khấu phiếu và hàng khách trả lại. */
+export interface ReceiptProfitRow {
+  receipt_id: number;
+  receipt_number: string;
+  date: string;
+  customer: string | null;
+  customer_id: number | null;
+  /** Tổng các dòng hàng trước chiết khấu phiếu. */
+  items_total: number;
+  discount: number;
+  /** Giá trị hàng khách đã trả lại (theo giá đã trừ chiết khấu). */
+  returned_revenue: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+  margin_percent: number;
+}
+
+export interface ReceiptProfitReport {
+  from_date: string;
+  to_date: string;
+  total_revenue: number;
+  total_cost: number;
+  total_profit: number;
+  total_discount: number;
+  total_returned: number;
+  margin_percent: number;
+  by_receipt: ReceiptProfitRow[];
+}
+
 export type ReturnType = "customer" | "supplier";
 
 export interface ReturnItemInput {

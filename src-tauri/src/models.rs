@@ -250,6 +250,39 @@ pub struct ProfitReport {
     pub by_product: Vec<ProductProfitRow>,
 }
 
+/// Một dòng = một hoá đơn bán, đã trừ chiết khấu phiếu và hàng khách trả lại.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptProfitRow {
+    pub receipt_id: i64,
+    pub receipt_number: String,
+    pub date: String,
+    pub customer: Option<String>,
+    pub customer_id: Option<i64>,
+    /// Tổng các dòng hàng trước chiết khấu phiếu.
+    pub items_total: f64,
+    /// Chiết khấu phiếu thực tế = items_total − total_amount.
+    pub discount: f64,
+    /// Giá trị hàng khách đã trả lại (theo giá đã trừ chiết khấu).
+    pub returned_revenue: f64,
+    pub revenue: f64,
+    pub cost: f64,
+    pub profit: f64,
+    pub margin_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptProfitReport {
+    pub from_date: String,
+    pub to_date: String,
+    pub total_revenue: f64,
+    pub total_cost: f64,
+    pub total_profit: f64,
+    pub total_discount: f64,
+    pub total_returned: f64,
+    pub margin_percent: f64,
+    pub by_receipt: Vec<ReceiptProfitRow>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportReceipt {
     pub id: i64,

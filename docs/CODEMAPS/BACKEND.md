@@ -66,7 +66,7 @@ Public: create/update customer|supplier return, `delete_return_receipt`, `get_re
 
 ### Dashboard / reports / history (~3268–3554)
 
-`get_dashboard_stats`, `get_profit_report`, `get_inventory_history`
+`get_dashboard_stats`, `get_profit_report`, `get_receipt_profit_report`, `get_inventory_history`
 
 ### Init + tests (~3555–end)
 
@@ -94,14 +94,14 @@ DB file: app data dir / `inventory.db` (local, single-user).
 | Chủ đề | Hàm |
 |--------|-----|
 | FIFO costing | `consume_batches_fifo` |
-| Giá vốn TB | `recompute_avg_cost` |
+| Giá vốn TB | `recompute_avg_cost` — hết lô thì GIỮ giá cũ, không về 0; `backfill_last_known_cost` sửa dữ liệu cũ (SCHEMA_VERSION 3) |
 | Không oversell | check stock trong `create_export_receipt` |
 | Công nợ KH | clamp `amount_paid` trong export; return giảm debt |
 | Sửa phiếu nhập | `update_import_receipt` — reject nếu batch đã bán |
 | Sửa/xoá phiếu xuất | `update_export_receipt`/`delete_export_receipt` — reject nếu đã có phiếu trả hàng dựa trên hoá đơn |
 | Reverse trả hàng | `reverse_return_effects` |
 | Trả nợ theo hoá đơn | `create/update/delete_debt_payment` — gắn đúng 1 `export_receipt_id`, clamp không vượt `remaining`, `payment_method` chỉ `cash`/`transfer` |
-| Profit + discount + returns | `get_profit_report` |
+| Profit + discount + returns | `get_profit_report` (theo SP), `get_receipt_profit_report` (theo hoá đơn) — 2 báo cáo phải khớp tổng |
 
 ## Tests nên chạy khi đụng hotspot
 

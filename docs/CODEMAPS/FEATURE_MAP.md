@@ -125,14 +125,20 @@ Tables: `customers`, `suppliers` (+ `debt`).
 
 | Layer | Files |
 |-------|--------|
-| UI | `src/app/reports/page.tsx` |
-| Store | `inventory-store` → `fetchProfitReport`, receipts lists |
-| API | `getProfitReport`, `getImportReceipts`, `getExportReceipts` |
+| UI | `src/app/reports/page.tsx`, `src/components/reports/receipt-profit-report-card.tsx`, `receipt-profit-detail-dialog.tsx` |
+| Store | `inventory-store` → `fetchProfitReport`, `fetchReceiptProfitReport`, receipts lists |
+| API | `getProfitReport`, `getReceiptProfitReport`, `getImportReceipts`, `getExportReceipts` |
 | Lib | `src/lib/export.ts` (xlsx), `src/lib/format.ts` |
-| DB | `get_profit_report` |
+| DB | `get_profit_report` (theo SP), `get_receipt_profit_report` (theo hoá đơn) |
 | Tables | `export_receipts`, `export_items`, `return_*` (trừ doanh thu trả), `import_*` |
 
 **Quy tắc:** profit = (unit - cost)*qty − discount phân bổ; customer returns trừ khỏi report.
+
+**Theo hoá đơn:** doanh thu = `export_receipts.total_amount` (đã trừ chiết khấu, đã clamp) −
+hàng khách trả của chính hoá đơn đó (mọi ngày, không giới hạn kỳ). Cùng một kỳ, tổng của
+báo cáo theo hoá đơn phải KHỚP tổng báo cáo theo sản phẩm — có test chặn
+(`receipt_profit_report_totals_match_product_report`). Lọc khách bằng `customer_id` ghép
+thẳng vào SQL, không lọc ở Rust.
 
 ---
 

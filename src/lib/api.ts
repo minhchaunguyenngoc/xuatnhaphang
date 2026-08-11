@@ -23,6 +23,7 @@ import type {
   Permission,
   Product,
   ProfitReport,
+  ReceiptProfitReport,
   ReturnReceipt,
   Supplier,
   UpdateCustomer,
@@ -117,4 +118,11 @@ export const api = {
     invoke<InventoryHistory[]>("get_inventory_history"),
   getProfitReport: (from: string, to: string) =>
     invoke<ProfitReport>("get_profit_report", { from, to }),
+  /** `customerId = null` → tất cả khách hàng. */
+  getReceiptProfitReport: (from: string, to: string, customerId: number | null) =>
+    invoke<ReceiptProfitReport>("get_receipt_profit_report", {
+      from,
+      to,
+      customerId,
+    }),
 };

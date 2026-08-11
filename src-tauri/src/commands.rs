@@ -442,3 +442,14 @@ pub fn get_profit_report(
 ) -> Result<ProfitReport, String> {
     db.get_profit_report(&from, &to).map_err(map_err_vi)
 }
+
+#[tauri::command(async)]
+pub fn get_receipt_profit_report(
+    db: State<'_, Database>,
+    from: String,
+    to: String,
+    customer_id: Option<i64>,
+) -> Result<ReceiptProfitReport, String> {
+    db.get_receipt_profit_report(&from, &to, customer_id)
+        .map_err(map_err_vi)
+}

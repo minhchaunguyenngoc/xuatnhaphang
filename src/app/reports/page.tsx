@@ -5,6 +5,7 @@ import { useShallow } from "zustand/react/shallow";
 import { Download } from "lucide-react";
 import { toast } from "sonner";
 
+import { ReceiptProfitReportCard } from "@/components/reports/receipt-profit-report-card";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/shared/stat-card";
 import { Badge } from "@/components/ui/badge";
@@ -338,6 +339,8 @@ export default function ReportsPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      <ReceiptProfitReportCard defaultFrom={from} defaultTo={to} />
     </div>
   );
 }
